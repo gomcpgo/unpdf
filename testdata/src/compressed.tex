@@ -1,0 +1,20 @@
+% A three-page PDF 1.5 file with a cross-reference stream and object streams.
+% Build with: pdflatex compressed.tex
+\pdfminorversion=5
+\pdfobjcompresslevel=2
+\pdfcompresslevel=9
+\pdfsuppressptexinfo=-1
+\pdftrailerid{unpdf-compressed}
+\pdfinfo{/Title (unpdf compressed test) /Author (The unpdf Authors)
+  /CreationDate (D:20261125120000Z) /ModDate (D:20261125120000Z)}
+\documentclass[a4paper]{article}
+\begin{document}
+\section{First page}
+This file has a cross-reference stream and keeps most objects in object streams.
+\newpage
+\section{Second page}
+Sphinx of black quartz, judge my vow.
+\newpage
+\section{Third page}
+The third page of the compressed test file.
+\end{document}
