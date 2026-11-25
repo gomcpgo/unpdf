@@ -400,7 +400,7 @@ func (f *File) setupSecurity(ctx context.Context, password string) error {
 		return err
 	}
 	f.sec = h
-	clear(f.cache) // anything cached so far was read without decryption
+	f.dropCache() // anything cached so far was read without decryption
 	return nil
 }
 

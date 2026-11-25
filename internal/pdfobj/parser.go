@@ -18,6 +18,7 @@ type Parser struct {
 	// Lookahead. Deciding whether "12 0 R" is a reference needs two tokens
 	// beyond the first integer.
 	queue []queued
+	buf   [4]queued // backing store for queue, so that lookahead costs no allocation
 }
 
 type queued struct {
@@ -33,14 +34,27 @@ func NewParser(lex *Lexer) *Parser {
 func (p *Parser) next() (Token, error) {
 	if len(p.queue) > 0 {
 		q := p.queue[0]
-		p.queue = p.queue[1:]
+		p.drop(1)
 		return q.tok, q.err
 	}
 	return p.lex.Next()
 }
 
+// drop removes the first n tokens of the lookahead queue.
+func (p *Parser) drop(n int) {
+	p.queue = p.queue[n:]
+	if len(p.queue) == 0 {
+		p.queue = p.buf[:0]
+	}
+}
+
 func (p *Parser) peek(i int) (Token, error) {
 	for len(p.queue) <= i {
+		if len(p.queue) == cap(p.queue) && len(p.queue) < len(p.buf) {
+			// The queue has crept to the end of its store: move it back.
+			n := copy(p.buf[:], p.queue)
+			p.queue = p.buf[:n]
+		}
 		t, err := p.lex.Next()
 		p.queue = append(p.queue, queued{t, err})
 	}
@@ -67,7 +81,7 @@ func (p *Parser) object(depth int) (Object, error) {
 			if err2 == nil && t2.Kind == Integer && t2.Int >= 0 && t2.Int <= 65535 {
 				t3, err3 := p.peek(1)
 				if err3 == nil && t3.Kind == Keyword && string(t3.Bytes) == "R" && t.Int <= 1<<31-1 {
-					p.queue = p.queue[2:]
+					p.drop(2)
 					return Ref{Num: int(t.Int), Gen: int(t2.Int)}, nil
 				}
 			}
@@ -109,7 +123,7 @@ func (p *Parser) array(depth int, off int64) (Object, error) {
 		}
 		switch t.Kind {
 		case ArrayClose:
-			p.queue = p.queue[1:]
+			p.drop(1)
 			return arr, nil
 		case EOF:
 			return nil, io.ErrUnexpectedEOF
@@ -204,7 +218,7 @@ func (p *Parser) ParseIndirect() (num, gen int, obj Object, err error) {
 	}
 	if d, ok := obj.(Dict); ok {
 		if t, err := p.peek(0); err == nil && t.Kind == Keyword && string(t.Bytes) == "stream" && len(p.queue) == 1 {
-			p.queue = p.queue[:0]
+			p.queue = p.buf[:0]
 			p.lex.SkipStreamEOL()
 			return num, gen, &Stream{Dict: d, Offset: p.lex.Offset(), Num: num, Gen: gen}, nil
 		}
@@ -236,7 +250,7 @@ func printable(b []byte) string {
 func (p *Parser) ContentNext() (Object, string, error) {
 	t, err := p.peek(0)
 	if err != nil {
-		p.queue = p.queue[1:]
+		p.drop(1)
 		return nil, "", err
 	}
 	switch t.Kind {
@@ -246,12 +260,15 @@ func (p *Parser) ContentNext() (Object, string, error) {
 		switch string(t.Bytes) {
 		case "true", "false", "null":
 		default:
-			p.queue = p.queue[1:]
+			p.drop(1)
+			if op, ok := operators[string(t.Bytes)]; ok {
+				return nil, op, nil // no allocation for the names seen millions of times
+			}
 			return nil, string(t.Bytes), nil
 		}
 	case ArrayClose, DictClose:
 		// A stray closing bracket: skip it.
-		p.queue = p.queue[1:]
+		p.drop(1)
 		return nil, "", &SyntaxError{t.Offset, "unexpected closing bracket"}
 	}
 	obj, err := p.object(0)
@@ -262,6 +279,20 @@ func (p *Parser) ContentNext() (Object, string, error) {
 // moves past the image data and its closing EI operator, and returns the
 // number of data bytes skipped.
 func (p *Parser) SkipInlineImage() int {
-	p.queue = p.queue[:0]
+	p.queue = p.buf[:0]
 	return p.lex.skipInlineImage()
 }
+
+// operators holds the content stream operators as ready-made strings.
+var operators = func() map[string]string {
+	m := map[string]string{}
+	for _, op := range []string{
+		"b", "B", "b*", "B*", "BDC", "BI", "BMC", "BT", "BX", "c", "cm", "CS", "cs", "d", "d0", "d1", "Do", "DP",
+		"EI", "EMC", "ET", "EX", "f", "F", "f*", "G", "g", "gs", "h", "i", "ID", "j", "J", "K", "k", "l", "m", "M",
+		"MP", "n", "q", "Q", "re", "RG", "rg", "ri", "s", "S", "SC", "sc", "SCN", "scn", "sh", "T*", "Tc", "Td",
+		"TD", "Tf", "Tj", "TJ", "TL", "Tm", "Tr", "Ts", "Tw", "Tz", "v", "w", "W", "W*", "y", "'", "\"",
+	} {
+		m[op] = op
+	}
+	return m
+}()

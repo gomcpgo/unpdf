@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"iter"
 
+	"github.com/gomcpgo/unpdf/internal/layout"
 	"github.com/gomcpgo/unpdf/internal/pdfobj"
 )
 
@@ -40,6 +41,14 @@ type Page struct {
 	doc       *Document
 	dict      pdfobj.Dict
 	resources pdfobj.Object
+
+	// Results kept for the life of the Page value, so that asking for its
+	// text, its blocks and whether it is a scan reads the page once.
+	content   *pageContent
+	blocks    []layout.Block // as laid out
+	marked    []layout.Block // with repeated lines marked as furniture
+	laidOut   bool
+	furnished bool
 }
 
 // Size returns the width and height of the page as displayed, in points:
@@ -105,7 +114,7 @@ func (d *Document) Pages(ctx context.Context) iter.Seq2[*Page, error] {
 	return func(yield func(*Page, error) bool) {
 		stopped := false
 		d.walk(ctx, func(p *Page) bool {
-			if !yield(p, nil) {
+			if !yield(d.remember(p), nil) {
 				stopped = true
 				return false
 			}
@@ -122,8 +131,13 @@ func (d *Document) Page(ctx context.Context, n int) (*Page, error) {
 	if n < 1 {
 		return nil, fmt.Errorf("unpdf: page %d: page numbers start at 1", n)
 	}
+	for _, r := range d.recent {
+		if r.Number == n {
+			return r, nil
+		}
+	}
 	if p := d.seek(ctx, n); p != nil {
-		return p, nil
+		return d.remember(p), nil
 	}
 	// The page counts in the tree did not lead anywhere. Count for real.
 	var found *Page
@@ -140,7 +154,7 @@ func (d *Document) Page(ctx context.Context, n int) (*Page, error) {
 	if found == nil {
 		return nil, fmt.Errorf("unpdf: page %d: the document has fewer pages", n)
 	}
-	return found, nil
+	return d.remember(found), nil
 }
 
 // seek finds page n by descending the page tree, using each node's /Count to

@@ -120,6 +120,8 @@ type Document struct {
 	maxPageGlyphs int
 	fonts         *font.Cache
 	glyphStats    map[*font.Font]map[int]glyphCount
+	bandCache     map[int]map[string]bool
+	recent        []*Page
 }
 
 // Open reads a PDF from r, which must stay readable until the Document is

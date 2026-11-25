@@ -79,6 +79,11 @@ type Font struct {
 	widths          []widthRange
 	dw              float64
 	cache           map[uint64]Glyph
+	// glyphs maps glyph IDs to Unicode, read from the embedded TrueType
+	// font program, and cidToGID maps CIDs to glyph IDs when that is not
+	// the identity. Both are used only when nothing else gives a mapping.
+	glyphs   map[uint16]rune
+	cidToGID []byte
 }
 
 type widthRange struct {
@@ -194,7 +199,7 @@ func clean(s string) (string, bool) {
 		if r == 0 || r == 0xFFFD || r == 0xFFFE || r == 0xFFFF {
 			return "", false
 		}
-		if r >= 0xFB00 && r <= 0xFB06 {
+		if r >= 0xFB00 && r <= 0xFEFC {
 			plain = false
 		}
 	}
@@ -203,25 +208,98 @@ func clean(s string) (string, bool) {
 	}
 	var b strings.Builder
 	for _, r := range s {
-		switch r {
-		case 0xFB00:
+		switch {
+		case r == 0xFB00:
 			b.WriteString("ff")
-		case 0xFB01:
+		case r == 0xFB01:
 			b.WriteString("fi")
-		case 0xFB02:
+		case r == 0xFB02:
 			b.WriteString("fl")
-		case 0xFB03:
+		case r == 0xFB03:
 			b.WriteString("ffi")
-		case 0xFB04:
+		case r == 0xFB04:
 			b.WriteString("ffl")
-		case 0xFB05, 0xFB06:
+		case r == 0xFB05, r == 0xFB06:
 			b.WriteString("st")
+		case r >= 0xFE70 && r <= 0xFEFC:
+			b.WriteString(arabicForm(r))
 		default:
-			b.WriteRune(r)
+			if base, ok := arabicFormsA[r]; ok {
+				b.WriteRune(base)
+			} else {
+				b.WriteRune(r)
+			}
 		}
 	}
 	return b.String(), true
 }
+
+// arabicLetters lists the letters of Arabic Presentation Forms-B from
+// U+FE80 on, each with the number of positional forms it has there
+// (isolated and final, or all four).
+var arabicLetters = []struct {
+	base  rune
+	forms int
+}{
+	{0x0621, 1}, {0x0622, 2}, {0x0623, 2}, {0x0624, 2}, {0x0625, 2}, {0x0626, 4}, {0x0627, 2}, {0x0628, 4},
+	{0x0629, 2}, {0x062A, 4}, {0x062B, 4}, {0x062C, 4}, {0x062D, 4}, {0x062E, 4}, {0x062F, 2}, {0x0630, 2},
+	{0x0631, 2}, {0x0632, 2}, {0x0633, 4}, {0x0634, 4}, {0x0635, 4}, {0x0636, 4}, {0x0637, 4}, {0x0638, 4},
+	{0x0639, 4}, {0x063A, 4}, {0x0641, 4}, {0x0642, 4}, {0x0643, 4}, {0x0644, 4}, {0x0645, 4}, {0x0646, 4},
+	{0x0647, 4}, {0x0648, 2}, {0x0649, 2}, {0x064A, 4},
+}
+
+// arabicForm converts a character of Arabic Presentation Forms-B, a letter
+// in one of its positional shapes or a lam-alef ligature, to the ordinary
+// letters. Fonts' ToUnicode maps often name the shape, not the letter.
+func arabicForm(r rune) string {
+	switch {
+	case r >= 0xFEF5:
+		// Lam-alef ligatures, isolated and final: with madda, hamza above,
+		// hamza below, plain.
+		alef := [4]rune{0x0622, 0x0623, 0x0625, 0x0627}[(r-0xFEF5)/2]
+		return string([]rune{0x0644, alef})
+	case r >= 0xFE80:
+		at := rune(0xFE80)
+		for _, l := range arabicLetters {
+			if r < at+rune(l.forms) {
+				return string(l.base)
+			}
+			at += rune(l.forms)
+		}
+	case r >= 0xFE70 && r <= 0xFE7F:
+		// Vowel marks: isolated at even code points, on a tatweel at odd
+		// ones. U+FE73 and U+FE75 are not marks of this pattern.
+		if r == 0xFE73 || r == 0xFE75 {
+			return string(r)
+		}
+		marks := [8]rune{0x064B, 0x064C, 0x064D, 0x064E, 0x064F, 0x0650, 0x0651, 0x0652}
+		mark := marks[(r-0xFE70)/2]
+		if (r-0xFE70)%2 == 1 {
+			return string([]rune{0x0640, mark})
+		}
+		return string(mark)
+	}
+	return string(r)
+}
+
+// arabicFormsA maps the positional forms of the commonest letters of
+// Arabic Presentation Forms-A, the ones Persian and Urdu add, to the
+// letters.
+var arabicFormsA = func() map[rune]rune {
+	m := map[rune]rune{}
+	for _, l := range []struct{ first, base rune }{
+		{0xFB56, 0x067E}, {0xFB66, 0x0679}, {0xFB7A, 0x0686}, {0xFB8E, 0x06A9}, {0xFB92, 0x06AF},
+		{0xFBA6, 0x06C1}, {0xFBFC, 0x06CC},
+	} {
+		for i := rune(0); i < 4; i++ {
+			m[l.first+i] = l.base
+		}
+	}
+	for _, l := range []struct{ first, base rune }{{0xFB8A, 0x0698}, {0xFB88, 0x0688}, {0xFB8C, 0x0691}, {0xFBAE, 0x06D2}, {0xFB9E, 0x06BA}} {
+		m[l.first], m[l.first+1] = l.base, l.base
+	}
+	return m
+}()
 
 // ---- Simple fonts ----
 
@@ -435,6 +513,23 @@ func (fnt *Font) loadComposite(ctx context.Context, f *reader.File, dict pdfobj.
 			fnt.dw = w / 1000
 		}
 		fnt.widths = readCIDWidths(ctx, f, f.Array(ctx, cid["W"]))
+
+		// With no word about Unicode in the PDF, the embedded font program
+		// may still have its character map.
+		_, knownCollection := cjk.ToUnicode(fnt.registry, fnt.ordering, 1)
+		if fnt.toUnicode == nil && !fnt.codesAreUnicode && !knownCollection {
+			fd := f.Dict(ctx, cid["FontDescriptor"])
+			if st := f.Stream(ctx, fd["FontFile2"]); st != nil {
+				if data, err := f.DecodeStream(ctx, st); err == nil && len(data) <= maxProgramBytes {
+					fnt.glyphs = glyphUnicode(data)
+				}
+			}
+			if st := f.Stream(ctx, cid["CIDToGIDMap"]); st != nil && fnt.glyphs != nil {
+				if data, err := f.DecodeStream(ctx, st); err == nil && len(data) <= 1<<17 {
+					fnt.cidToGID = data
+				}
+			}
+		}
 	}
 
 	switch enc := resolve(ctx, f, dict["Encoding"]).(type) {
@@ -589,6 +684,18 @@ func (fnt *Font) nextComposite(s []byte) Glyph {
 		}
 	}
 
+	if !g.Mapped && haveCID && fnt.glyphs != nil && cid <= 0xFFFF {
+		gid := uint16(cid)
+		if fnt.cidToGID != nil {
+			gid = 0
+			if i := 2 * int(cid); i+1 < len(fnt.cidToGID) {
+				gid = uint16(fnt.cidToGID[i])<<8 | uint16(fnt.cidToGID[i+1])
+			}
+		}
+		if r, ok := fnt.glyphs[gid]; ok {
+			g.Text, g.Mapped = clean(string(r))
+		}
+	}
 	if !g.Mapped && fnt.toUnicode != nil {
 		g.Mapped, g.Missing = true, true
 	}

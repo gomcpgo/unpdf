@@ -55,6 +55,10 @@ type Glyph struct {
 	// DX, DY is the glyph's advance in page space, from its own width. The
 	// baseline runs along this vector.
 	DX, DY float64
+	// UX, UY is the unit vector of the writing direction in page space:
+	// along the baseline for horizontal text, down the column for vertical
+	// text. Unlike DX, DY it is defined for glyphs of zero width too.
+	UX, UY float64
 	// Size is the font size in page space units.
 	Size float64
 	Font *font.Font
@@ -70,6 +74,10 @@ type Glyph struct {
 	// Replaced reports that the enclosing marked content has /ActualText.
 	// The first glyph of the span carries that text; the rest carry none.
 	Replaced bool
+	// Clipped reports that the glyph lies outside the clipping path in
+	// force, so it is not visible. Clipping paths are approximated by their
+	// bounding boxes, which errs on the side of keeping text.
+	Clipped bool
 }
 
 // Image is an image placed on the page.
@@ -82,7 +90,8 @@ type Image struct {
 // Sink receives what the interpreter finds. Either function may be nil.
 type Sink struct {
 	// Glyph is called for every glyph shown. Returning false stops the
-	// interpretation.
+	// interpretation. The Glyph is reused for the next call: copy it to
+	// keep it.
 	Glyph func(*Glyph) bool
 	Image func(Image)
 }
@@ -94,7 +103,23 @@ const (
 	maxErrors     = 500
 )
 
+// box is an axis-aligned rectangle in page space.
+type box struct {
+	x0, y0, x1, y1 float64
+	set            bool
+}
+
+func (b *box) add(x, y float64) {
+	if !b.set {
+		*b = box{x, y, x, y, true}
+		return
+	}
+	b.x0, b.y0 = math.Min(b.x0, x), math.Min(b.y0, y)
+	b.x1, b.y1 = math.Max(b.x1, x), math.Max(b.y1, y)
+}
+
 type gstate struct {
+	clip                 box // the clipping path's bounding box, if any
 	ctm                  Matrix
 	font                 *font.Font
 	size                 float64
@@ -128,6 +153,9 @@ type Interp struct {
 	marks   []marked
 	depth   int
 	active  map[int]bool // form XObjects being executed, to cut recursion
+	glyph   Glyph        // the glyph handed to the sink, reused
+	path    box          // bounding box of the path under construction
+	clipNow bool         // W or W* seen: the path becomes the clip when it ends
 	ops     int
 	stopped bool
 }
@@ -148,6 +176,7 @@ func (in *Interp) Run(ctx context.Context, data []byte, res pdfobj.Dict, ctm Mat
 	in.tm, in.tlm = Identity, Identity
 	in.marks = in.marks[:0]
 	in.depth, in.ops, in.stopped = 0, 0, false
+	in.path, in.clipNow = box{}, false
 	in.active = map[int]bool{}
 	in.run(data, &resources{dict: res})
 	return ctx.Err()
@@ -228,6 +257,37 @@ func (in *Interp) exec(op string, args []pdfobj.Object, p *pdfobj.Parser, res *r
 			}
 		}
 
+	// Paths matter only as clipping regions. Track the bounding box of
+	// the points; curves stay inside the hull of their control points.
+	case "m", "l":
+		in.pathPoint(num(args, n-2), num(args, n-1))
+	case "c":
+		for i := 6; i >= 2; i -= 2 {
+			in.pathPoint(num(args, n-i), num(args, n-i+1))
+		}
+	case "v", "y":
+		for i := 4; i >= 2; i -= 2 {
+			in.pathPoint(num(args, n-i), num(args, n-i+1))
+		}
+	case "re":
+		x, y, w, h := num(args, n-4), num(args, n-3), num(args, n-2), num(args, n-1)
+		in.pathPoint(x, y)
+		in.pathPoint(x+w, y)
+		in.pathPoint(x, y+h)
+		in.pathPoint(x+w, y+h)
+	case "W", "W*":
+		in.clipNow = true
+	case "n", "S", "s", "f", "F", "f*", "B", "B*", "b", "b*":
+		if in.clipNow && in.path.set {
+			if c := &g.clip; c.set {
+				c.x0, c.y0 = math.Max(c.x0, in.path.x0), math.Max(c.y0, in.path.y0)
+				c.x1, c.y1 = math.Min(c.x1, in.path.x1), math.Min(c.y1, in.path.y1)
+			} else {
+				*c = in.path
+			}
+		}
+		in.path, in.clipNow = box{}, false
+
 	// Text objects and text state.
 	case "BT":
 		in.tm, in.tlm = Identity, Identity
@@ -296,8 +356,12 @@ func (in *Interp) exec(op string, args []pdfobj.Object, p *pdfobj.Parser, res *r
 				switch v := item.(type) {
 				case pdfobj.String:
 					in.show(v)
-				case int64, float64:
-					in.advance(-num([]pdfobj.Object{v}, 0) / 1000 * g.size)
+				case int64:
+					in.advance(-float64(v) / 1000 * g.size)
+				case float64:
+					if !math.IsNaN(v) && !math.IsInf(v, 0) {
+						in.advance(-v / 1000 * g.size)
+					}
 				}
 				if in.stopped {
 					return
@@ -392,6 +456,15 @@ func (in *Interp) font(res *resources, name pdfobj.Name) *font.Font {
 	return fnt
 }
 
+// pathPoint adds a point, given in user space, to the current path.
+func (in *Interp) pathPoint(x, y float64) {
+	m := in.gs.ctm
+	px, py := m[0]*x+m[2]*y+m[4], m[1]*x+m[3]*y+m[5]
+	if finite(px, py) {
+		in.path.add(px, py)
+	}
+}
+
 // moveLine starts a new line, offset from the start of the current one.
 func (in *Interp) moveLine(tx, ty float64) {
 	in.tlm = Matrix{1, 0, 0, 1, tx, ty}.Mul(in.tlm)
@@ -432,7 +505,8 @@ func (in *Interp) show(s []byte) {
 		s = s[ch.Bytes:]
 
 		m := in.tm.Mul(g.ctm)
-		out := Glyph{
+		out := &in.glyph
+		*out = Glyph{
 			Text: ch.Text, Mapped: ch.Mapped, Missing: ch.Missing,
 			X:    m[2]*g.rise + m[4],
 			Y:    m[3]*g.rise + m[5],
@@ -447,11 +521,23 @@ func (in *Interp) show(s []byte) {
 		if vertical {
 			w := ch.Width * g.size
 			out.DX, out.DY = w*m[2], w*m[3]
+			out.UX, out.UY = unit(-m[2], -m[3])
 			in.tm = Matrix{1, 0, 0, 1, 0, w + spacing}.Mul(in.tm)
 		} else {
 			w := ch.Width * g.size * g.th
 			out.DX, out.DY = w*m[0], w*m[1]
+			out.UX, out.UY = unit(m[0], m[1])
+			if g.size*g.th < 0 {
+				out.UX, out.UY = -out.UX, -out.UY
+			}
 			in.tm = Matrix{1, 0, 0, 1, w + spacing*g.th, 0}.Mul(in.tm)
+		}
+		if c := g.clip; c.set {
+			// Judge by the middle of the glyph, with some slack: clips are
+			// often drawn tight around the text they frame.
+			mx, my := out.X+out.DX/2, out.Y+out.DY/2
+			slack := out.Size / 2
+			out.Clipped = mx < c.x0-slack || mx > c.x1+slack || my < c.y0-slack || my > c.y1+slack
 		}
 		if actual != nil {
 			out.Replaced, out.Mapped = true, true
@@ -463,11 +549,21 @@ func (in *Interp) show(s []byte) {
 		if !finite(out.X, out.Y, out.DX, out.DY, out.Size) {
 			continue
 		}
-		if in.sink.Glyph != nil && !in.sink.Glyph(&out) {
+		if in.sink.Glyph != nil && !in.sink.Glyph(out) {
 			in.stopped = true
 			return
 		}
 	}
+}
+
+// unit scales a vector to length one. A zero vector yields the direction of
+// ordinary upright text.
+func unit(x, y float64) (float64, float64) {
+	n := math.Hypot(x, y)
+	if n == 0 || math.IsNaN(n) || math.IsInf(n, 0) {
+		return 1, 0
+	}
+	return x / n, y / n
 }
 
 func finite(vs ...float64) bool {
@@ -543,6 +639,7 @@ func (in *Interp) xobject(o pdfobj.Object, parent *resources) {
 	saved, savedStack := in.gs, in.stack
 	savedTm, savedTlm, savedMarks := in.tm, in.tlm, len(in.marks)
 	in.stack = nil
+	in.path, in.clipNow = box{}, false
 	in.gs.ctm = matrix.Mul(in.gs.ctm)
 	in.depth++
 	in.run(data, res)

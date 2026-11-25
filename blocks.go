@@ -1,0 +1,200 @@
+// Copyright 2026 The unpdf Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package unpdf
+
+import (
+	"context"
+	"math"
+	"strings"
+	"unicode"
+
+	"github.com/gomcpgo/unpdf/internal/content"
+	"github.com/gomcpgo/unpdf/internal/layout"
+)
+
+// Box is a rectangle on the page as displayed: in points, measured from the
+// top-left corner of the page after cropping and rotation, with Y growing
+// downward. X0,Y0 is the top-left corner and X1,Y1 the bottom-right.
+type Box struct {
+	X0, Y0, X1, Y1 float64
+}
+
+// Word is a run of characters with no space between them.
+type Word struct {
+	Text string
+	Box  Box
+	// Font is the name of the word's font, without any subset tag, and
+	// Size its size in points. Bold and Italic are set where the font says
+	// so or its name gives it away.
+	Font         string
+	Size         float64
+	Bold, Italic bool
+}
+
+// Line is a row of words on one baseline, in reading order.
+type Line struct {
+	Words []Word
+	Box   Box
+	// RTL reports a line of right-to-left script, such as Arabic or Hebrew.
+	// Its words are in logical order: the first word is the rightmost on
+	// the page.
+	RTL bool
+}
+
+// Text returns the line's words separated by single spaces.
+func (l Line) Text() string {
+	words := make([]string, len(l.Words))
+	for i, w := range l.Words {
+		words[i] = w.Text
+	}
+	return strings.Join(words, " ")
+}
+
+// Block is a group of lines that belong together: a paragraph, a heading, a
+// list item, the row of a table.
+type Block struct {
+	Lines []Line
+	Box   Box
+	// Angle is the direction of the block's text in degrees, clockwise from
+	// upright: 0 for ordinary text, 90 for text that reads down the page.
+	Angle int
+	// Furniture reports that the block is a running head, a running foot
+	// or a page number: text that repeats in the same place from page to
+	// page, or that the document itself declares to be an artifact. It is
+	// still returned, so that the caller decides whether to keep it.
+	Furniture bool
+}
+
+// Text returns the text of the block, one line of the page per line of
+// text. A word hyphenated at the end of a line is joined to its
+// continuation when the hyphen is clearly there for the line break: a soft
+// hyphen, or a hyphen between two lower-case letters.
+func (b Block) Text() string {
+	lines := make([][]string, len(b.Lines))
+	rtl := make([]bool, len(b.Lines))
+	for i, l := range b.Lines {
+		lines[i] = make([]string, len(l.Words))
+		for j, w := range l.Words {
+			lines[i][j] = w.Text
+		}
+		rtl[i] = l.RTL
+	}
+	return layout.JoinLines(lines, rtl)
+}
+
+// Blocks returns the text of the page as blocks of lines of words, in
+// reading order, each with its position on the page.
+//
+// Reading order is worked out from the layout. A page set in columns is
+// read one column after the other; text that does not form columns of
+// prose, such as a table, is read row by row. Text in other directions,
+// such as a label running up the side, comes after the main text.
+func (p *Page) Blocks(ctx context.Context) ([]Block, error) {
+	laid, err := p.layout(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Block, len(laid))
+	for i, b := range laid {
+		out[i] = Block{Box: Box(b.Box), Angle: b.Angle, Furniture: b.Furniture, Lines: make([]Line, len(b.Lines))}
+		for j, l := range b.Lines {
+			line := Line{Box: Box(l.Box), RTL: l.RTL, Words: make([]Word, len(l.Words))}
+			for k, w := range l.Words {
+				line.Words[k] = Word{Text: w.Text, Box: Box(w.Box), Font: w.Font, Size: w.Size, Bold: w.Bold, Italic: w.Italic}
+			}
+			out[i].Lines[j] = line
+		}
+	}
+	return out, nil
+}
+
+// layout interprets the page and analyses its layout. With furniture set,
+// lines that repeat from page to page are marked, which means reading the
+// two pages before and the two after as well.
+func (p *Page) layout(ctx context.Context, furniture bool) ([]layout.Block, error) {
+	if !p.laidOut {
+		pc, err := p.interpret(ctx)
+		if err != nil {
+			return nil, publicErr(err)
+		}
+		p.blocks, p.laidOut = layout.Analyze(p.visible(pc.glyphs)), true
+		// The glyphs have served their purpose; a page has thousands.
+		pc.glyphs = nil
+	}
+	if !furniture {
+		return p.blocks, nil
+	}
+	if !p.furnished {
+		_, height := p.Size()
+		test, err := p.doc.furnitureTest(ctx, p.Number, height)
+		if err != nil {
+			return nil, err
+		}
+		p.marked = p.blocks
+		if test != nil {
+			p.marked = layout.Mark(p.blocks, test)
+		}
+		p.furnished = true
+	}
+	return p.marked, nil
+}
+
+// display converts a glyph from page space to display space: the crop box
+// moved to the origin, the page rotation applied, and Y flipped to grow
+// downward.
+func (p *Page) display(g *content.Glyph, out *layout.Glyph) {
+	box := p.CropBox
+	w, h := box.Width(), box.Height()
+	x, y := g.X-box.X0, g.Y-box.Y0
+	ux, uy := g.UX, g.UY
+	if ux == 0 && uy == 0 {
+		ux = 1
+	}
+	out.Text, out.Advance, out.Size, out.Artifact = g.Text, math.Hypot(g.DX, g.DY), g.Size, g.Artifact
+	if !g.Mapped {
+		out.Text = string(unicode.ReplacementChar)
+	}
+	if g.Font != nil {
+		out.Font, out.Bold, out.Italic = g.Font.Name, g.Font.Bold, g.Font.Italic
+	}
+	switch p.Rotate {
+	case 90:
+		out.X, out.Y, out.UX, out.UY = y, x, uy, ux
+	case 180:
+		out.X, out.Y, out.UX, out.UY = w-x, y, -ux, uy
+	case 270:
+		out.X, out.Y, out.UX, out.UY = h-y, w-x, -uy, -ux
+	default:
+		out.X, out.Y, out.UX, out.UY = x, h-y, ux, -uy
+	}
+}
+
+// Scanned reports whether the page looks like a scan: an image covers most
+// of it and it shows little or no text of its own. A scan with an OCR text
+// layer counts too; its hidden text is what Text returns. A caller can send
+// such a page to OCR or to a vision model.
+func (p *Page) Scanned(ctx context.Context) (bool, error) {
+	pc, err := p.interpret(ctx)
+	if err != nil {
+		return false, publicErr(err)
+	}
+	box := p.CropBox
+	area := box.Width() * box.Height()
+	if area <= 0 {
+		return false, nil
+	}
+	// Scanners often store a page as a few strips, so add the images up.
+	covered := 0.0
+	for _, img := range pc.images {
+		w := math.Min(img.X1, box.X1) - math.Max(img.X0, box.X0)
+		h := math.Min(img.Y1, box.Y1) - math.Max(img.Y0, box.Y0)
+		if w > 0 && h > 0 {
+			covered += w * h
+		}
+	}
+	if covered < 0.7*area {
+		return false, nil
+	}
+	return pc.shown < 50, nil
+}

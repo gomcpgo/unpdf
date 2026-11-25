@@ -74,6 +74,7 @@ type Lexer struct {
 	chunk int   // size of the next read
 	rerr  error // first read error other than io.EOF
 	lim   Limits
+	word  []byte // scratch space for numbers and keywords
 }
 
 const (
@@ -277,25 +278,28 @@ func (l *Lexer) Next() (Token, error) {
 	}
 
 	// A number or a keyword: read up to the next white space or delimiter.
-	word := []byte{c}
+	word := append(l.word[:0], c)
 	for {
 		c, ok := l.peek()
 		if !ok || IsSpace(c) || IsDelim(c) {
 			break
 		}
 		if len(word) >= maxToken {
+			l.word = word[:0]
 			return Token{}, &SyntaxError{off, "token too long"}
 		}
 		word = append(word, c)
 		l.pos++
 	}
+	l.word = word[:0]
 	if isInt, i, f, ok := parseNumber(word); ok {
 		if isInt {
 			return Token{Kind: Integer, Offset: off, Int: i}, nil
 		}
 		return Token{Kind: Real, Offset: off, Real: f}, nil
 	}
-	return Token{Kind: Keyword, Offset: off, Bytes: word}, nil
+	// A keyword outlives the scratch space: the parser looks ahead.
+	return Token{Kind: Keyword, Offset: off, Bytes: append([]byte(nil), word...)}, nil
 }
 
 // parseNumber parses a PDF number: an optional sign, digits, and at most one

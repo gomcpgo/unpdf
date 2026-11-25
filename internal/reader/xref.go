@@ -291,7 +291,7 @@ func (f *File) rebuild(ctx context.Context) error {
 	f.xref = nil
 	f.Trailer = pdfobj.Dict{}
 	f.pending = nil
-	clear(f.cache)
+	f.dropCache()
 	clear(f.stmCache)
 	f.stmBytes = 0
 
@@ -498,6 +498,7 @@ func (f *File) expandObjStreams(ctx context.Context) {
 			}
 			f.setEntry(num, entry{kind: compressed, off: int64(stmNum), gen: uint32(idx)}, true)
 			delete(f.cache, num)
+			delete(f.oldCache, num)
 		}
 	}
 }

@@ -37,10 +37,15 @@
 //
 // # Text
 //
-// Page.Text returns a page's text in the order the page draws it. Glyphs
-// that a font gives no Unicode mapping for appear as U+FFFD; the document's
-// warnings then say which font and how many glyphs, so a caller can decide
-// whether the text is trustworthy or the page should go to OCR.
+// Page.Text returns a page's text in reading order. Page.Blocks returns the
+// same text as blocks of lines of words, each with its position, and with
+// running heads and page numbers marked so that they can be left out.
+// Page.Scanned says whether the page is an image of a page, to be sent to
+// OCR.
+//
+// Glyphs that a font gives no Unicode mapping for appear as U+FFFD; the
+// document's warnings then say which font and how many glyphs, so a caller
+// can decide whether the text is trustworthy.
 //
 // # Damaged and encrypted files
 //

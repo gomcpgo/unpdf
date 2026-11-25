@@ -519,6 +519,18 @@ func FuzzOpen(f *testing.F) {
 			if !utf8.ValidString(text) {
 				t.Fatalf("page %d: text is not valid UTF-8", n)
 			}
+			blocks, err := p.Blocks(ctx)
+			if err != nil {
+				t.Fatalf("Blocks failed without cancellation: %v", err)
+			}
+			for _, b := range blocks {
+				if len(b.Lines) == 0 || math.IsNaN(b.Box.X0+b.Box.Y0+b.Box.X1+b.Box.Y1) {
+					t.Fatalf("page %d: bad block %+v", n, b)
+				}
+			}
+			if _, err := p.Scanned(ctx); err != nil {
+				t.Fatalf("Scanned failed without cancellation: %v", err)
+			}
 		}
 		if n > 64 {
 			t.Fatalf("walked %d pages, over MaxPages", n)

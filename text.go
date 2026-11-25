@@ -13,6 +13,7 @@ import (
 
 	"github.com/gomcpgo/unpdf/internal/content"
 	"github.com/gomcpgo/unpdf/internal/font"
+	"github.com/gomcpgo/unpdf/internal/layout"
 	"github.com/gomcpgo/unpdf/internal/pdfobj"
 	"github.com/gomcpgo/unpdf/internal/reader"
 )
@@ -87,6 +88,8 @@ const defaultMaxPageGlyphs = 500_000
 type pageContent struct {
 	glyphs []content.Glyph
 	images []content.Image
+	// shown counts the glyphs with text that a reader can see.
+	shown int
 }
 
 // contentBytes returns the page's content streams, decoded and joined. A
@@ -134,8 +137,14 @@ func resolveQuiet(ctx context.Context, f *reader.File, o pdfobj.Object) pdfobj.O
 // interpret runs the page's content stream and collects its glyphs and
 // images.
 func (p *Page) interpret(ctx context.Context) (*pageContent, error) {
+	if p.content != nil {
+		return p.content, nil
+	}
 	d := p.doc
-	pc := &pageContent{}
+	data := p.contentBytes(ctx)
+	// A glyph takes at least a few bytes of content stream; sizing the
+	// slice from that saves growing it many times over.
+	pc := &pageContent{glyphs: make([]content.Glyph, 0, min(len(data)/8+16, d.maxPageGlyphs))}
 	counts := map[*font.Font]glyphCount{}
 	truncated := false
 	sink := content.Sink{
@@ -153,6 +162,9 @@ func (p *Page) interpret(ctx context.Context) (*pageContent, error) {
 				}
 				counts[g.Font] = c
 			}
+			if !g.Invisible && !g.Clipped && strings.TrimSpace(g.Text) != "" {
+				pc.shown++
+			}
 			pc.glyphs = append(pc.glyphs, *g)
 			return true
 		},
@@ -167,7 +179,7 @@ func (p *Page) interpret(ctx context.Context) (*pageContent, error) {
 	}
 	in := content.New(d.f, d.fonts, sink)
 	res := d.f.Dict(ctx, p.resources)
-	if err := in.Run(ctx, p.contentBytes(ctx), res, content.Identity); err != nil {
+	if err := in.Run(ctx, data, res, content.Identity); err != nil {
 		return nil, err
 	}
 	if err := p.annotations(ctx, in, res, pc); err != nil {
@@ -187,6 +199,7 @@ func (p *Page) interpret(ctx context.Context) (*pageContent, error) {
 		}
 		d.glyphStats[fnt][p.Number] = c
 	}
+	p.content = pc
 	return pc, nil
 }
 
@@ -313,131 +326,57 @@ func (p *Page) fieldValue(ctx context.Context, annot pdfobj.Dict) string {
 	return ""
 }
 
-// Text returns the text of the page.
-//
-// The text comes out in the order the page draws it, with a space wherever
-// there is a gap between glyphs on a line and a line break wherever the
-// baseline moves. Pages laid out in columns are usually drawn column by
-// column, but nothing guarantees it; layout analysis that works out the
-// reading order is not implemented yet.
+// Text returns the text of the page in reading order: its blocks, as
+// Blocks returns them, separated by blank lines, with one line of text per
+// line on the page. Words hyphenated at a line end are joined.
 //
 // Glyphs whose font gives no Unicode mapping appear as U+FFFD, and are
 // counted in a warning.
 func (p *Page) Text(ctx context.Context) (string, error) {
-	pc, err := p.interpret(ctx)
+	blocks, err := p.layout(ctx, true)
 	if err != nil {
-		return "", publicErr(err)
+		return "", err
 	}
-	return plainText(p.visible(pc.glyphs)), nil
+	return layout.Text(blocks), nil
 }
 
-// visible drops the glyphs a reader of the page would not see as text of
-// their own: those outside the crop box, such as printer's marks and file
-// identifiers in the trim area, and those drawn a second time on top of
-// themselves to fake a bold face or a shadow.
-func (p *Page) visible(glyphs []content.Glyph) []content.Glyph {
-	// The grid step is part of the key: it differs between font sizes, and
-	// cells of different grids must not be compared.
-	type cell struct {
-		text string
-		step float64
-		x, y int
+// visible converts the page's glyphs to display space, leaving out those a
+// reader of the page would not see:
+//
+//   - those outside the crop box, such as printer's marks and file
+//     identifiers in the trim area, and those outside the clipping path;
+//   - invisible text, unless nearly all the page's text is invisible, which
+//     is how an OCR layer over a scanned page looks. There the hidden text
+//     is the content.
+//
+// Text drawn twice on top of itself is dealt with later, word by word.
+func (p *Page) visible(glyphs []content.Glyph) []layout.Glyph {
+	shown, hidden := 0, 0
+	for i := range glyphs {
+		if g := &glyphs[i]; g.Text != "" && g.Text != " " || !g.Mapped {
+			if g.Invisible {
+				hidden++
+			} else {
+				shown++
+			}
+		}
 	}
-	seen := make(map[cell]struct{}, len(glyphs))
+	keepHidden := shown*10 < hidden
+
 	box := p.CropBox
-	out := glyphs[:0]
-	for _, g := range glyphs {
+	out := make([]layout.Glyph, 0, len(glyphs))
+	for i := range glyphs {
+		g := &glyphs[i]
+		if g.Clipped || (g.Invisible && !keepHidden) {
+			continue
+		}
 		// Half a glyph of tolerance: text set right at the edge stays.
 		margin := g.Size / 2
 		if g.X < box.X0-margin || g.X > box.X1+margin || g.Y < box.Y0-margin || g.Y > box.Y1+margin {
 			continue
 		}
-		if g.Text != "" && g.Text != " " {
-			// Two glyphs with the same text that sit almost on top of each
-			// other are one glyph drawn twice. "Almost" is measured against
-			// the glyph's own advance, because two real occurrences of a
-			// character are at least one advance apart, however the text is
-			// scaled. Look in the grid cell the glyph falls in and in its
-			// neighbours.
-			q := g.Size / 10
-			if adv := math.Hypot(g.DX, g.DY); adv > 0 {
-				q = math.Min(q, adv/6)
-			}
-			q = math.Max(q, 0.01)
-			cx, cy := int(math.Floor(g.X/q)), int(math.Floor(g.Y/q))
-			dup := false
-			for dx := -1; dx <= 1 && !dup; dx++ {
-				for dy := -1; dy <= 1 && !dup; dy++ {
-					_, dup = seen[cell{g.Text, q, cx + dx, cy + dy}]
-				}
-			}
-			if dup {
-				continue
-			}
-			seen[cell{g.Text, q, cx, cy}] = struct{}{}
-		}
-		out = append(out, g)
+		out = append(out, layout.Glyph{})
+		p.display(g, &out[len(out)-1])
 	}
 	return out
-}
-
-// spaceGap is the gap between two glyphs on a line, as a fraction of the
-// font size, beyond which they belong to different words. Word spaces are a
-// quarter of an em or more before justification squeezes them; kerning and
-// letter fit stay well under a tenth.
-const spaceGap = 0.12
-
-// plainText joins glyphs into lines by looking at how each glyph sits
-// relative to the one before it.
-func plainText(glyphs []content.Glyph) string {
-	var b strings.Builder
-	var prev *content.Glyph
-	endsWithSpace := true // nothing to put a space after yet
-	for i := range glyphs {
-		g := &glyphs[i]
-		text := g.Text
-		if !g.Mapped {
-			text = "�"
-		}
-		if text == "" {
-			continue // a glyph whose text was given by an earlier one
-		}
-		if prev != nil {
-			// Measure in the frame of the previous glyph's baseline.
-			ux, uy := prev.DX, prev.DY
-			if n := math.Hypot(ux, uy); n > 0 {
-				ux, uy = ux/n, uy/n
-			} else {
-				ux, uy = 1, 0
-			}
-			along := (g.X-prev.X-prev.DX)*ux + (g.Y-prev.Y-prev.DY)*uy
-			across := (g.Y-prev.Y)*ux - (g.X-prev.X)*uy
-			size := math.Max(prev.Size, g.Size)
-			if size <= 0 {
-				size = 1
-			}
-			switch {
-			case math.Abs(across) > 0.6*size || along < -1.5*size:
-				// A different baseline, or a jump back along the same one.
-				trimTrailingSpace(&b)
-				b.WriteByte('\n')
-				endsWithSpace = true
-			case along > spaceGap*size && !endsWithSpace && !strings.HasPrefix(text, " "):
-				b.WriteByte(' ')
-			}
-		}
-		b.WriteString(text)
-		endsWithSpace = strings.HasSuffix(text, " ")
-		prev = g
-	}
-	trimTrailingSpace(&b)
-	return b.String()
-}
-
-func trimTrailingSpace(b *strings.Builder) {
-	s := b.String()
-	if t := strings.TrimRight(s, " "); len(t) != len(s) {
-		b.Reset()
-		b.WriteString(t)
-	}
 }

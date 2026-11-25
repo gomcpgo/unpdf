@@ -300,3 +300,39 @@ func TestType1EncodingParser(t *testing.T) {
 		t.Error("StandardEncoding should report no custom encoding")
 	}
 }
+
+func TestClean(t *testing.T) {
+	r := func(codes ...rune) string { return string(codes) }
+	tests := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"plain", "plain", true},
+		{r(0xFB01), "fi", true},
+		{r('o', 0xFB03, 'c', 'e'), "office", true},
+		{r(0xFE8D), r(0x0627), true},                 // alef, isolated
+		{r(0xFE8E), r(0x0627), true},                 // alef, final
+		{r(0xFE91), r(0x0628), true},                 // beh, initial
+		{r(0xFEDF), r(0x0644), true},                 // lam, initial
+		{r(0xFEF2), r(0x064A), true},                 // yeh, final
+		{r(0xFEF4), r(0x064A), true},                 // yeh, medial: the last letter form
+		{r(0xFEFB), r(0x0644, 0x0627), true},         // lam-alef ligature
+		{r(0xFEF5), r(0x0644, 0x0622), true},         // lam-alef with madda
+		{r(0xFE80), r(0x0621), true},                 // hamza
+		{r(0xFE76), r(0x064E), true},                 // fatha
+		{r(0xFE77), r(0x0640, 0x064E), true},         // fatha on a tatweel
+		{r(0xFB58), r(0x067E), true},                 // peh, initial
+		{r(0xFB8B), r(0x0698), true},                 // jeh, final
+		{r(0x05D0, 0x05D1), r(0x05D0, 0x05D1), true}, // Hebrew is left alone
+		{"", "", false},
+		{r(0), "", false},
+		{r('a', 0xFFFD), "", false},
+	}
+	for _, tt := range tests {
+		got, ok := clean(tt.in)
+		if got != tt.want || ok != tt.ok {
+			t.Errorf("clean(%+q) = %+q, %v; want %+q, %v", tt.in, got, ok, tt.want, tt.ok)
+		}
+	}
+}

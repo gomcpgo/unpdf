@@ -137,7 +137,12 @@ type File struct {
 	sec        *security.Handler
 	encryptObj int // object number of the encryption dictionary, 0 if direct
 
+	// Parsed objects are cached in two generations. When the young one is
+	// full it becomes the old one and the old one is dropped, so the objects
+	// in use, which are found again and moved back to the young generation,
+	// survive, and memory stays bounded.
 	cache      map[int]pdfobj.Object
+	oldCache   map[int]pdfobj.Object
 	stmCache   map[int]*objStream
 	stmBytes   int
 	stmLoading map[int]bool
@@ -325,6 +330,10 @@ func (f *File) Get(ctx context.Context, num int) (pdfobj.Object, error) {
 	if o, ok := f.cache[num]; ok {
 		return o, nil
 	}
+	if o, ok := f.oldCache[num]; ok {
+		f.store(num, o)
+		return o, nil
+	}
 	e := f.entry(num)
 	var obj pdfobj.Object
 	var err error
@@ -348,11 +357,22 @@ func (f *File) Get(ctx context.Context, num int) (pdfobj.Object, error) {
 	if err != nil {
 		return nil, err
 	}
+	f.store(num, obj)
+	return obj, nil
+}
+
+// store puts an object in the young generation of the cache.
+func (f *File) store(num int, obj pdfobj.Object) {
 	if len(f.cache) >= maxCachedObjects {
-		clear(f.cache)
+		f.oldCache, f.cache = f.cache, make(map[int]pdfobj.Object, maxCachedObjects/4)
 	}
 	f.cache[num] = obj
-	return obj, nil
+}
+
+// dropCache forgets every cached object.
+func (f *File) dropCache() {
+	clear(f.cache)
+	f.oldCache = nil
 }
 
 func (f *File) loadAt(num int, e entry) (pdfobj.Object, error) {

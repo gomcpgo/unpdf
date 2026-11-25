@@ -47,13 +47,13 @@ func textOf(t *testing.T, content, extra string, more func(b *pdftest.Builder) s
 func TestTextFromTestdata(t *testing.T) {
 	tests := map[string][]string{
 		"testdata/classic.pdf": {
-			"1 First page\nThis file has a classic cross-reference table. The quick brown fox jumps over the\nlazy dog.\n1",
-			"2 Second page\nThe second page of the classic test file.\n2",
+			"1 First page\n\nThis file has a classic cross-reference table. The quick brown fox jumps over the\nlazy dog.\n\n1",
+			"2 Second page\n\nThe second page of the classic test file.\n\n2",
 		},
 		"testdata/compressed.pdf": {
-			"1 First page\nThis file has a cross-reference stream and keeps most objects in object streams.\n1",
-			"2 Second page\nSphinx of black quartz, judge my vow.\n2",
-			"3 Third page\nThe third page of the compressed test file.\n3",
+			"1 First page\n\nThis file has a cross-reference stream and keeps most objects in object streams.\n\n1",
+			"2 Second page\n\nSphinx of black quartz, judge my vow.\n\n2",
+			"3 Third page\n\nThe third page of the compressed test file.\n\n3",
 		},
 	}
 	for file, want := range tests {
@@ -88,9 +88,14 @@ func TestWordsAndLines(t *testing.T) {
 		{"kerning does not split a word", "BT /F1 12 Tf 72 700 Td [(A) 80 (V) -30 (A)] TJ ET", "AVA"},
 		{"a new baseline is a new line", "BT /F1 12 Tf 72 700 Td (one) Tj 0 -14 Td (two) Tj ET", "one\ntwo"},
 		{"separate text objects on one line", "BT /F1 12 Tf 72 700 Td (left) Tj ET BT /F1 12 Tf 200 700 Td (right) Tj ET", "left right"},
-		{"going back along the line", "BT /F1 12 Tf 300 700 Td (second) Tj ET BT /F1 12 Tf 72 700 Td (first) Tj ET", "second\nfirst"},
+		{"drawing order does not matter", "BT /F1 12 Tf 300 700 Td (second) Tj ET BT /F1 12 Tf 72 700 Td (first) Tj ET", "first second"},
+		{"lines are read top to bottom", "BT /F1 12 Tf 72 600 Td (lower) Tj ET BT /F1 12 Tf 72 700 Td (upper) Tj ET", "upper\n\nlower"},
+		{"a wide gap starts a new block", "BT /F1 12 Tf 72 700 Td (one) Tj 0 -14 Td (two) Tj 0 -40 Td (three) Tj ET", "one\ntwo\n\nthree"},
+		{"a heading is its own block", "BT /F1 20 Tf 72 700 Td (Title) Tj /F1 10 Tf 0 -16 Td (body text) Tj ET", "Title\n\nbody text"},
+		{"a hyphenated word is joined", "BT /F1 12 Tf 72 700 Td (an exam-) Tj 0 -14 Td (ple of it) Tj ET", "an example\nof it"},
+		{"a compound at a line end is kept", "BT /F1 12 Tf 72 700 Td (the X-) Tj 0 -14 Td (ray and 1-) Tj 0 -14 Td (2 items) Tj ET", "the X-\nray and 1-\n2 items"},
 		{"a superscript stays on its line", "BT /F1 12 Tf 72 700 Td (E=mc) Tj 4 Ts /F1 8 Tf (2) Tj ET", "E=mc2"},
-		{"no double spaces", "BT /F1 12 Tf 72 700 Td [(a ) -500 ( b)] TJ ET", "a  b"},
+		{"no double spaces", "BT /F1 12 Tf 72 700 Td [(a ) -500 ( b)] TJ ET", "a b"},
 		{"rotated text reads along its baseline", "BT /F1 12 Tf 0 1 -1 0 100 100 Tm [(up) -400 (the)] TJ 0 -14 Td (page) Tj ET", "up the\npage"},
 		{"empty page", "", ""},
 	}
@@ -112,8 +117,8 @@ func TestWhatIsNotText(t *testing.T) {
 	// A word drawn twice, slightly offset, to look bold is one word. The
 	// same letters elsewhere are untouched, at any font size.
 	_, got = textOf(t, "BT /F1 12 Tf 100 700 Td (Bold) Tj ET BT /F1 12 Tf 100.3 700 Td (Bold) Tj ET "+
-		"BT /F1 12 Tf 100 650 Td (Bold eee) Tj ET BT /F1 40 Tf 100 600 Td (Bee) Tj ET BT /F1 4 Tf 100 590 Td (Bee) Tj ET", "", nil)
-	if got != "Bold\nBold eee\nBee\nBee" {
+		"BT /F1 12 Tf 100 650 Td (Bold eee) Tj ET BT /F1 40 Tf 100 600 Td (Bee) Tj ET BT /F1 4 Tf 100 540 Td (Bee) Tj ET", "", nil)
+	if got != "Bold\n\nBold eee\n\nBee\n\nBee" {
 		t.Errorf("duplicates: got %q", got)
 	}
 }
@@ -166,7 +171,7 @@ func TestFormFieldsAndAnnotations(t *testing.T) {
 		note := b.Add(fmt.Sprintf("<< /Type /Annot /Subtype /FreeText /Rect [300 500 400 520] /AP << /N << /On %d 0 R /Off %d 0 R >> >> /AS /On >>", noteAP, ap))
 		return fmt.Sprintf("/Annots [%d 0 R %d 0 R %d 0 R %d 0 R %d 0 R %d 0 R]", filled, bare, box, hidden, link, note)
 	})
-	if got != "Name: Alice\nBob\na note" {
+	if got != "Name: Alice\n\nBob\n\na note" {
 		t.Errorf("text = %q", got)
 	}
 }
