@@ -431,3 +431,33 @@ func ShiftOffsets(data []byte) []byte {
 func PrefixJunk(data []byte) []byte {
 	return append([]byte("HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\n\r\n"), data...)
 }
+
+// PageSpec describes one page for Pages.
+type PageSpec struct {
+	// Content is the page's content stream.
+	Content string
+	// Resources is the resource dictionary in PDF syntax. Empty means none.
+	Resources string
+	// Extra is more entries for the page dictionary, in PDF syntax without
+	// the enclosing brackets, such as "/Rotate 90 /Annots [5 0 R]".
+	Extra string
+}
+
+// Pages adds one page per spec, a page tree and a catalog, and makes the
+// catalog the document root. Pages are US Letter unless Extra says
+// otherwise.
+func (b *Builder) Pages(specs ...PageSpec) {
+	pages := b.Reserve()
+	kids := ""
+	for _, spec := range specs {
+		content := b.AddStream("<< >>", []byte(spec.Content))
+		res := spec.Resources
+		if res == "" {
+			res = "<< >>"
+		}
+		page := b.Add(fmt.Sprintf("<< /Type /Page /Parent %d 0 R /Contents %d 0 R /Resources %s %s >>", pages, content, res, spec.Extra))
+		kids += fmt.Sprintf("%d 0 R ", page)
+	}
+	b.Set(pages, fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d /MediaBox [0 0 612 792] >>", kids, len(specs)))
+	b.Root = b.Add(fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+}

@@ -4,9 +4,11 @@
 // Command unpdf inspects PDF files.
 //
 //	unpdf info [-password PW] [-json] file.pdf
+//	unpdf text [-password PW] [-first N] [-last N] file.pdf
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -30,6 +32,8 @@ func main() {
 	switch os.Args[1] {
 	case "info":
 		err = info(ctx, os.Args[2:])
+	case "text":
+		err = text(ctx, os.Args[2:])
 	default:
 		usage()
 	}
@@ -47,6 +51,7 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: unpdf info [-password PW] [-json] file.pdf")
+	fmt.Fprintln(os.Stderr, "       unpdf text [-password PW] [-first N] [-last N] file.pdf")
 	os.Exit(64)
 }
 
@@ -135,4 +140,46 @@ func info(ctx context.Context, args []string) error {
 
 func round2(v float64) float64 {
 	return float64(int64(v*100+0.5)) / 100
+}
+
+// text prints the text of each page, with a form feed after every page.
+func text(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("text", flag.ExitOnError)
+	password := fs.String("password", "", "password for an encrypted file")
+	first := fs.Int("first", 1, "first page to print")
+	last := fs.Int("last", 0, "last page to print (0 means the last page)")
+	fs.Parse(args)
+	if fs.NArg() != 1 {
+		usage()
+	}
+	doc, err := unpdf.OpenFile(ctx, fs.Arg(0), unpdf.Options{Password: *password})
+	if err != nil {
+		return err
+	}
+	defer doc.Close()
+
+	out := bufio.NewWriter(os.Stdout)
+	defer out.Flush()
+	for page, err := range doc.Pages(ctx) {
+		if err != nil {
+			return err
+		}
+		if page.Number < *first {
+			continue
+		}
+		if *last > 0 && page.Number > *last {
+			break
+		}
+		s, err := page.Text(ctx)
+		if err != nil {
+			return err
+		}
+		out.WriteString(s)
+		out.WriteString("\n\f")
+	}
+	out.Flush()
+	for _, w := range doc.Warnings() {
+		fmt.Fprintf(os.Stderr, "warning [%s]: %s\n", w.Code, w.Message)
+	}
+	return nil
 }

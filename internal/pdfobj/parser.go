@@ -226,3 +226,42 @@ func printable(b []byte) string {
 	}
 	return string(append(out, '"'))
 }
+
+// ContentNext reads the next element of a content stream. An operand comes
+// back as (object, "", nil) and an operator as (nil, name, nil). At the end
+// of the stream it returns io.EOF.
+//
+// Content streams have no indirect objects, so the only keywords that are
+// operands are true, false and null; every other keyword is an operator.
+func (p *Parser) ContentNext() (Object, string, error) {
+	t, err := p.peek(0)
+	if err != nil {
+		p.queue = p.queue[1:]
+		return nil, "", err
+	}
+	switch t.Kind {
+	case EOF:
+		return nil, "", io.EOF
+	case Keyword:
+		switch string(t.Bytes) {
+		case "true", "false", "null":
+		default:
+			p.queue = p.queue[1:]
+			return nil, string(t.Bytes), nil
+		}
+	case ArrayClose, DictClose:
+		// A stray closing bracket: skip it.
+		p.queue = p.queue[1:]
+		return nil, "", &SyntaxError{t.Offset, "unexpected closing bracket"}
+	}
+	obj, err := p.object(0)
+	return obj, "", err
+}
+
+// SkipInlineImage is called after the ID operator of an inline image. It
+// moves past the image data and its closing EI operator, and returns the
+// number of data bytes skipped.
+func (p *Parser) SkipInlineImage() int {
+	p.queue = p.queue[:0]
+	return p.lex.skipInlineImage()
+}

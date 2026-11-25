@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/gomcpgo/unpdf/internal/font"
 	"github.com/gomcpgo/unpdf/internal/pdfobj"
 	"github.com/gomcpgo/unpdf/internal/reader"
 )
@@ -85,6 +86,8 @@ type Limits struct {
 	// MaxPages caps the number of pages that will be enumerated. Default
 	// 1,000,000.
 	MaxPages int
+	// MaxPageGlyphs caps the glyphs read from one page. Default 500,000.
+	MaxPageGlyphs int
 	// MaxWarnings caps how many warnings are kept. Default 200.
 	MaxWarnings int
 }
@@ -112,6 +115,11 @@ type Document struct {
 	catalog  pdfobj.Dict
 	info     Info
 	maxPages int
+
+	maxStream     int64
+	maxPageGlyphs int
+	fonts         *font.Cache
+	glyphStats    map[*font.Font]map[int]glyphCount
 }
 
 // Open reads a PDF from r, which must stay readable until the Document is
@@ -136,9 +144,15 @@ func Open(ctx context.Context, r io.ReaderAt, size int64, opts Options) (*Docume
 	if err != nil {
 		return nil, publicErr(err)
 	}
-	d := &Document{f: f, maxPages: lim.MaxPages}
+	d := &Document{f: f, maxPages: lim.MaxPages, maxStream: lim.MaxStreamBytes, maxPageGlyphs: lim.MaxPageGlyphs}
 	if d.maxPages <= 0 {
 		d.maxPages = defaultMaxPages
+	}
+	if d.maxStream <= 0 {
+		d.maxStream = 256 << 20
+	}
+	if d.maxPageGlyphs <= 0 {
+		d.maxPageGlyphs = defaultMaxPageGlyphs
 	}
 	d.catalog = f.Dict(ctx, f.Trailer["Root"])
 	d.info = d.readInfo(ctx)
@@ -216,5 +230,5 @@ func (d *Document) Warnings() []Warning {
 	for _, w := range d.f.Warnings() {
 		out = append(out, Warning{Code: w.Code, Message: w.Message})
 	}
-	return out
+	return append(out, d.glyphWarnings()...)
 }

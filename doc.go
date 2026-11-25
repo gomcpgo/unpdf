@@ -1,8 +1,8 @@
 // Copyright 2026 The unpdf Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// Package unpdf reads PDF files: their metadata and pages today, and their
-// text, structure, tables and images as the package grows. It is written in
+// Package unpdf reads PDF files: their metadata, pages and text today, and
+// their structure, tables and images as the package grows. It is written in
 // pure Go, with no cgo and no external programs.
 //
 // PDFs are treated as untrusted input. Every parser checks bounds, and the
@@ -28,9 +28,19 @@
 //		if err != nil {
 //			return err
 //		}
-//		w, h := page.Size()
-//		fmt.Println(page.Number, w, h)
+//		text, err := page.Text(ctx)
+//		if err != nil {
+//			return err
+//		}
+//		fmt.Println(page.Number, text)
 //	}
+//
+// # Text
+//
+// Page.Text returns a page's text in the order the page draws it. Glyphs
+// that a font gives no Unicode mapping for appear as U+FFFD; the document's
+// warnings then say which font and how many glyphs, so a caller can decide
+// whether the text is trustworthy or the page should go to OCR.
 //
 // # Damaged and encrypted files
 //

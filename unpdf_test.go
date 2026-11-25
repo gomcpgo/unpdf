@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gomcpgo/unpdf/internal/pdftest"
 )
@@ -480,6 +481,9 @@ func FuzzOpen(f *testing.F) {
 	for _, layout := range []pdftest.Layout{pdftest.Classic, pdftest.Compressed} {
 		b := pdftest.Document(3)
 		b.Layout = layout
+		font := b.Add(`<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>`)
+		b.Set(2, fmt.Sprintf("<< /Type /Page /Parent 1 0 R /Contents 3 0 R /Resources << /Font << /F1 %d 0 R >> >> >>", font))
+		b.SetStream(3, "<< >>", []byte("BT /F1 12 Tf 72 700 Td [(Hello) -300 (world)] TJ ET"))
 		meta := b.AddStream("<< /Type /Metadata /Subtype /XML >>", []byte(`<x:xmpmeta xmlns:x="adobe:ns:meta/"/>`))
 		b.Set(b.Root, fmt.Sprintf("<< /Type /Catalog /Pages 1 0 R /Metadata %d 0 R >>", meta))
 		f.Add(b.Bytes())
@@ -507,6 +511,13 @@ func FuzzOpen(f *testing.F) {
 			}
 			if w, h := p.Size(); !(w > 0 && h > 0) {
 				t.Fatalf("page %d has size %v x %v", n, w, h)
+			}
+			text, err := p.Text(ctx)
+			if err != nil {
+				t.Fatalf("Text failed without cancellation: %v", err)
+			}
+			if !utf8.ValidString(text) {
+				t.Fatalf("page %d: text is not valid UTF-8", n)
 			}
 		}
 		if n > 64 {

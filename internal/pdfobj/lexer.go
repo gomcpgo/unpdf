@@ -492,3 +492,46 @@ func unhex(c byte) (byte, bool) {
 	}
 	return 0, false
 }
+
+// skipInlineImage scans forward for the EI that ends inline image data. The
+// data is binary and may contain the letters "EI" by chance, so a candidate
+// only counts when it stands alone as a token and what follows looks like
+// content-stream text.
+func (l *Lexer) skipInlineImage() int {
+	// One white-space byte separates ID from the data.
+	if c, ok := l.peek(); ok && IsSpace(c) {
+		l.pos++
+	}
+	skipped := 0
+	prevSpace := true
+	for {
+		c, ok := l.readByte()
+		if !ok {
+			return skipped
+		}
+		if c == 'E' && prevSpace {
+			if c2, ok := l.peek(); ok && c2 == 'I' {
+				after, more := l.peekAt(1)
+				if !more || IsSpace(after) {
+					plausible := true
+					for i := 2; i < 12; i++ {
+						b, ok := l.peekAt(i)
+						if !ok {
+							break
+						}
+						if b >= 0x7f || (b < 0x20 && !IsSpace(b)) {
+							plausible = false
+							break
+						}
+					}
+					if plausible {
+						l.pos++ // the I
+						return skipped
+					}
+				}
+			}
+		}
+		prevSpace = IsSpace(c)
+		skipped++
+	}
+}

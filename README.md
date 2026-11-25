@@ -2,7 +2,7 @@
 
 A pure-Go library for getting the content out of PDF files, built for feeding documents to language models and search indexes.
 
-**Status: early.** The file-reading layer is done: opening, repairing and decrypting PDFs, metadata and the page tree. Text extraction is next; structure, tables and images follow.
+**Status: early.** It opens, repairs and decrypts PDFs, reads metadata and pages, and extracts the text of each page in the order the page draws it. Layout analysis (columns, reading order, right-to-left text, joining hyphenated words) is next; Markdown, structure, tables and images follow.
 
 - No cgo, no external programs, no dependencies outside the Go standard library.
 - Safe on untrusted input: bounded memory, configurable limits, no panics on malformed files. Every parser has a fuzz target.
@@ -30,8 +30,11 @@ for page, err := range doc.Pages(ctx) {
     if err != nil {
         return err
     }
-    w, h := page.Size()
-    fmt.Printf("page %d: %.0f x %.0f pt\n", page.Number, w, h)
+    text, err := page.Text(ctx)
+    if err != nil {
+        return err
+    }
+    fmt.Printf("--- page %d ---\n%s\n", page.Number, text)
 }
 
 for _, w := range doc.Warnings() {
@@ -45,6 +48,7 @@ There is also a small command-line tool:
 
 ```sh
 go run github.com/gomcpgo/unpdf/cmd/unpdf info report.pdf
+go run github.com/gomcpgo/unpdf/cmd/unpdf text report.pdf
 ```
 
 ## What works today
@@ -55,6 +59,19 @@ go run github.com/gomcpgo/unpdf/cmd/unpdf info report.pdf
 - Encryption with the standard security handler: RC4 (40 to 128 bits), AES-128 and AES-256, revisions 2 to 6. Files with an empty user password open without asking.
 - Metadata from the document information dictionary and from XMP.
 - Pages with their media box, crop box and rotation.
+- Page text:
+  - Simple fonts with the standard encodings, `/Differences` and the Adobe Glyph List, including the glyph names TeX uses for mathematics and the built-in encoding of embedded Type 1 fonts.
+  - Composite fonts through `/ToUnicode`, the predefined CJK CMaps (Shift-JIS, EUC, GBK, Big5, UHC and the Unicode ones) and Adobe's character collections.
+  - Text inside form XObjects, the values of form fields, and free-text annotations.
+  - `/ActualText` replacements, Latin ligatures expanded to their letters.
+  - Text outside the crop box and text drawn twice to fake bold are left out.
+
+## What does not work yet
+
+- Reading order is the drawing order. Multi-column pages usually come out right; tables often do not.
+- Arabic and Hebrew come out in visual order, reversed.
+- Words hyphenated at a line end are not joined.
+- Fonts whose only route to Unicode is the embedded font program's own tables (TrueType `cmap`, CFF charset) give U+FFFD, with a warning that names the font and counts the glyphs.
 
 ## Errors
 
@@ -69,4 +86,4 @@ go run github.com/gomcpgo/unpdf/cmd/unpdf info report.pdf
 
 ## Licence
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE). The package embeds glyph and character-mapping data from Adobe and Unicode under their own permissive licences; see [NOTICE](NOTICE).
