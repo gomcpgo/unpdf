@@ -301,9 +301,11 @@ func (p *Page) Scanned(ctx context.Context) (bool, error) {
 	}
 	// Scanners often store a page as a few strips, so add the images up.
 	covered := 0.0
-	for _, img := range pc.images {
-		w := math.Min(img.X1, box.X1) - math.Max(img.X0, box.X0)
-		h := math.Min(img.Y1, box.Y1) - math.Max(img.Y0, box.Y0)
+	for i := range pc.images {
+		// The part of the image that a clipping path leaves visible.
+		img := &pc.images[i]
+		w := math.Min(img.VX1, box.X1) - math.Max(img.VX0, box.X0)
+		h := math.Min(img.VY1, box.Y1) - math.Max(img.VY0, box.Y0)
 		if w > 0 && h > 0 {
 			covered += w * h
 		}

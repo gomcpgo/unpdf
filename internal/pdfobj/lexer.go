@@ -4,6 +4,7 @@
 package pdfobj
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"math"
@@ -497,15 +498,67 @@ func unhex(c byte) (byte, bool) {
 	return 0, false
 }
 
-// skipInlineImage scans forward for the EI that ends inline image data. The
-// data is binary and may contain the letters "EI" by chance, so a candidate
-// only counts when it stands alone as a token and what follows looks like
-// content-stream text.
-func (l *Lexer) skipInlineImage() int {
+// inlineImage reads the data of an inline image and the EI that ends it. A
+// lexer over a byte slice returns the data, as a part of that slice; one
+// that reads from a file only moves past it and returns nil.
+//
+// With size 0 or more, the data is taken to be that long if EI follows at
+// that point, as it does for an image whose size its dictionary gives away.
+// Otherwise the data is searched for its end.
+func (l *Lexer) inlineImage(size int) []byte {
 	// One white-space byte separates ID from the data.
 	if c, ok := l.peek(); ok && IsSpace(c) {
 		l.pos++
 	}
+	start := l.pos
+	var n int
+	if size >= 0 && l.src == nil && l.endsInlineImage(start+size) {
+		n = size
+	} else {
+		n = l.skipInlineImage()
+	}
+	if l.src != nil {
+		return nil
+	}
+	data := l.buf[start : start+n : start+n]
+	if n != size {
+		// The white space before EI is not data. An end of line is what
+		// writers put there; anything else might be the image's last byte.
+		switch {
+		case bytes.HasSuffix(data, []byte("\r\n")):
+			data = data[:len(data)-2]
+		case bytes.HasSuffix(data, []byte("\n")), bytes.HasSuffix(data, []byte("\r")):
+			data = data[:len(data)-1]
+		}
+	}
+	return data[:len(data):len(data)]
+}
+
+// endsInlineImage reports whether EI stands at offset at of the buffer,
+// after any white space, as a token of its own. If so it moves past it.
+func (l *Lexer) endsInlineImage(at int) bool {
+	if at < l.pos || at > len(l.buf) {
+		return false
+	}
+	i := at
+	for i < len(l.buf) && IsSpace(l.buf[i]) {
+		i++
+	}
+	if i+2 > len(l.buf) || l.buf[i] != 'E' || l.buf[i+1] != 'I' {
+		return false
+	}
+	if i+2 < len(l.buf) && !IsSpace(l.buf[i+2]) && !IsDelim(l.buf[i+2]) {
+		return false
+	}
+	l.pos = i + 2
+	return true
+}
+
+// skipInlineImage scans forward for the EI that ends inline image data. The
+// data is binary and may contain the letters "EI" by chance, so a candidate
+// only counts when it stands alone as a token and what follows looks like
+// content-stream text. It returns the number of bytes of data.
+func (l *Lexer) skipInlineImage() int {
 	skipped := 0
 	prevSpace := true
 	for {

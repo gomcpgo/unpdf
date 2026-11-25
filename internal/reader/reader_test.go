@@ -216,6 +216,53 @@ func TestFilterChainsAndUnsupportedFilters(t *testing.T) {
 	}
 }
 
+func TestImageFilters(t *testing.T) {
+	b := pdftest.New()
+	jpeg := b.AddStream("<< /Filter /DCTDecode >>", []byte("a JPEG file"))
+	wrapped := b.AddStream("<< /Filter [/ASCIIHexDecode /FlateDecode /CCITTFaxDecode] /DecodeParms [null null << /K -1 /Columns 99 >>] >>",
+		[]byte(fmt.Sprintf("%X>", pdftest.Flate([]byte("fax data")))))
+	plain := b.AddStream("<< /Filter /FlateDecode >>", pdftest.Flate([]byte("samples")))
+	under := b.AddStream("<< /Filter [/DCTDecode /FlateDecode] >>", []byte("the wrong way round"))
+	b.Root = b.Add("<< /Type /Catalog /Pages << /Type /Pages /Kids [] /Count 0 >> >>")
+	f := open(t, b.Bytes(), "")
+	stream := func(n int) *pdfobj.Stream {
+		obj, _ := f.Get(ctx, n)
+		return obj.(*pdfobj.Stream)
+	}
+
+	// The data comes back in the image's own format, whatever wraps it.
+	for _, tt := range []struct {
+		num          int
+		filter, data string
+	}{{jpeg, "DCTDecode", "a JPEG file"}, {wrapped, "CCITTFaxDecode", "fax data"}, {plain, "", "samples"}} {
+		st := stream(tt.num)
+		name, parms := f.ImageFilter(ctx, st.Dict)
+		data, err := f.DecodeImage(ctx, st)
+		if name != tt.filter || err != nil || string(data) != tt.data {
+			t.Errorf("object %d: filter %q, data %q, err %v; want %q, %q", tt.num, name, data, err, tt.filter, tt.data)
+		}
+		if tt.num == wrapped && parms["Columns"] != int64(99) {
+			t.Errorf("parameters of the image filter = %v", parms)
+		}
+	}
+	var unsupported *UnsupportedError
+	if _, err := f.DecodeImage(ctx, stream(under)); !errors.As(err, &unsupported) {
+		t.Errorf("an image filter under another filter: got %v", err)
+	}
+
+	// The same for data that is not in a stream of the file.
+	hex := pdftest.Parse("<< /Filter [/ASCIIHexDecode /DCTDecode] >>").(pdfobj.Dict)
+	if data, err := f.DecodeInline(ctx, hex, []byte("FF D8>")); err != nil || string(data) != "\xFF\xD8" {
+		t.Errorf("DecodeInline: got %q, err %v", data, err)
+	}
+	if data, err := f.DecodeInline(ctx, pdfobj.Dict{}, []byte("as it is")); err != nil || string(data) != "as it is" {
+		t.Errorf("DecodeInline with no filter: got %q, err %v", data, err)
+	}
+	if !IsImageFilter("JPXDecode") || !IsImageFilter("JBIG2Decode") || IsImageFilter("FlateDecode") {
+		t.Error("IsImageFilter gives wrong answers")
+	}
+}
+
 func TestLoosePagesAreAdopted(t *testing.T) {
 	// A file whose catalog and page tree are gone, as after truncation.
 	b := pdftest.New()

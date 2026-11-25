@@ -63,6 +63,11 @@ type Page struct {
 	// objNum is the number of the page object, 0 when it is not an
 	// indirect object. Destinations refer to pages by it.
 	objNum int
+	// images are all the images of the page, with those that repeat on
+	// other pages marked once repeatsMarked is set.
+	images        []Image
+	imaged        bool
+	repeatsMarked bool
 }
 
 // Size returns the width and height of the page as displayed, in points:

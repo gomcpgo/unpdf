@@ -41,7 +41,49 @@ func (f *File) DecodeStream(ctx context.Context, st *pdfobj.Stream) ([]byte, err
 	return f.decode(ctx, st, true)
 }
 
+// IsImageFilter reports whether name is a filter whose data is an image in
+// a format of its own: JPEG, JPEG 2000, JBIG2 or CCITT fax.
+func IsImageFilter(name string) bool {
+	switch name {
+	case "DCTDecode", "JPXDecode", "JBIG2Decode", "CCITTFaxDecode":
+		return true
+	}
+	return false
+}
+
+// ImageFilter returns the image filter among the filters of a stream
+// dictionary, with its decode parameters, or "" when there is none. It
+// reads the dictionary only.
+func (f *File) ImageFilter(ctx context.Context, d pdfobj.Dict) (string, pdfobj.Dict) {
+	names, _, dicts := f.filters(ctx, d)
+	for i, name := range names {
+		if IsImageFilter(name) {
+			return name, dicts[i]
+		}
+	}
+	return "", nil
+}
+
+// DecodeImage returns the data of an image stream with its filters undone
+// as far as the image filter, if it has one: what comes back for a stream
+// with DCTDecode is a JPEG file, whatever other filters wrap it. A stream
+// with no image filter is decoded in full, as by DecodeStream.
+func (f *File) DecodeImage(ctx context.Context, st *pdfobj.Stream) ([]byte, error) {
+	return f.decodeTo(ctx, st, true, true)
+}
+
+// DecodeInline does for the data of an inline image, given with its
+// dictionary, what DecodeImage does for an image stream. The result may be
+// data itself.
+func (f *File) DecodeInline(ctx context.Context, d pdfobj.Dict, data []byte) ([]byte, error) {
+	return f.unfilter(ctx, d, 0, data, true)
+}
+
 func (f *File) decode(ctx context.Context, st *pdfobj.Stream, decrypt bool) ([]byte, error) {
+	return f.decodeTo(ctx, st, decrypt, false)
+}
+
+func (f *File) decodeTo(ctx context.Context, st *pdfobj.Stream, decrypt, image bool) ([]byte, error) {
 	if st.Dict["F"] != nil {
 		return nil, &UnsupportedError{"stream data in an external file"}
 	}
@@ -52,13 +94,25 @@ func (f *File) decode(ctx context.Context, st *pdfobj.Stream, decrypt bool) ([]b
 	if decrypt {
 		data = f.decryptStream(ctx, st, data)
 	}
-	names, parms := f.filters(ctx, st.Dict)
+	return f.unfilter(ctx, st.Dict, st.Num, data, image)
+}
+
+// unfilter undoes the filters that the dictionary d names. With image set
+// it stops at an image filter and returns the data in that filter's format.
+func (f *File) unfilter(ctx context.Context, d pdfobj.Dict, num int, data []byte, image bool) ([]byte, error) {
+	names, parms, _ := f.filters(ctx, d)
 	for i, name := range names {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		if name == "Crypt" {
 			continue // handled by decryptStream
+		}
+		if image && IsImageFilter(name) {
+			if i != len(names)-1 {
+				return nil, &UnsupportedError{"filter " + name + " under another filter"}
+			}
+			return data, nil
 		}
 		if !filter.Known(name) {
 			return nil, &UnsupportedError{"filter " + name}
@@ -68,10 +122,10 @@ func (f *File) decode(ctx context.Context, st *pdfobj.Stream, decrypt bool) ([]b
 			return nil, &LimitError{"decoded stream size", f.lim.MaxStreamBytes}
 		}
 		if err != nil {
-			return nil, fmt.Errorf("object %d: %s: %w", st.Num, name, err)
+			return nil, fmt.Errorf("object %d: %s: %w", num, name, err)
 		}
 		if partial {
-			f.warn(WarnStreamData, "object %d: %s data is damaged; decoded what could be read", st.Num, name)
+			f.warn(WarnStreamData, "object %d: %s data is damaged; decoded what could be read", num, name)
 		}
 		data = out
 	}
@@ -79,8 +133,10 @@ func (f *File) decode(ctx context.Context, st *pdfobj.Stream, decrypt bool) ([]b
 }
 
 // filters returns the filter names of a stream dictionary with their decode
-// parameters, in the order they must be applied.
-func (f *File) filters(ctx context.Context, d pdfobj.Dict) ([]string, []filter.Params) {
+// parameters, in the order they must be applied. The parameters come twice:
+// as the filters of this package take them, and as the dictionaries they
+// were read from, nil where a filter has none.
+func (f *File) filters(ctx context.Context, d pdfobj.Dict) ([]string, []filter.Params, []pdfobj.Dict) {
 	var names []string
 	switch v := f.resolveQuiet(ctx, d["Filter"]).(type) {
 	case pdfobj.Name:
@@ -104,8 +160,12 @@ func (f *File) filters(ctx context.Context, d pdfobj.Dict) ([]string, []filter.P
 			dicts = append(dicts, f.Dict(ctx, x))
 		}
 	}
+	for len(dicts) < len(names) {
+		dicts = append(dicts, nil)
+	}
+	dicts = dicts[:len(names)]
 	for i := range parms {
-		if i >= len(dicts) || dicts[i] == nil {
+		if dicts[i] == nil {
 			continue
 		}
 		get := func(key pdfobj.Name) int {
@@ -123,7 +183,7 @@ func (f *File) filters(ctx context.Context, d pdfobj.Dict) ([]string, []filter.P
 			parms[i].EarlyChange = &ec
 		}
 	}
-	return names, parms
+	return names, parms, dicts
 }
 
 // decryptStream decrypts stream data when the document is encrypted and the
@@ -139,7 +199,7 @@ func (f *File) decryptStream(ctx context.Context, st *pdfobj.Stream, data []byte
 	}
 	// A stream can name its own crypt filter through a /Crypt filter entry.
 	cryptName := ""
-	names, _ := f.filters(ctx, st.Dict)
+	names, _, _ := f.filters(ctx, st.Dict)
 	for i, name := range names {
 		if name != "Crypt" {
 			continue

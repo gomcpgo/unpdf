@@ -7,6 +7,8 @@
 //	unpdf text [-password PW] [-first N] [-last N] file.pdf
 //	unpdf markdown [-password PW] [-pages LIST] [-furniture] [-no-page-markers] file.pdf
 //	unpdf outline [-password PW] file.pdf
+//	unpdf tables [-password PW] [-first N] [-last N] [-min CONFIDENCE] file.pdf
+//	unpdf images [-password PW] [-first N] [-last N] [-all] [-out DIR] file.pdf
 package main
 
 import (
@@ -18,6 +20,9 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/gomcpgo/unpdf"
@@ -42,6 +47,8 @@ func main() {
 		err = outline(ctx, os.Args[2:])
 	case "tables":
 		err = tables(ctx, os.Args[2:])
+	case "images":
+		err = images(ctx, os.Args[2:])
 	default:
 		usage()
 	}
@@ -63,6 +70,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "       unpdf markdown [-password PW] [-pages LIST] [-furniture] [-no-page-markers] file.pdf")
 	fmt.Fprintln(os.Stderr, "       unpdf outline [-password PW] file.pdf")
 	fmt.Fprintln(os.Stderr, "       unpdf tables [-password PW] [-first N] [-last N] [-min CONFIDENCE] file.pdf")
+	fmt.Fprintln(os.Stderr, "       unpdf images [-password PW] [-first N] [-last N] [-all] [-out DIR] file.pdf")
 	os.Exit(64)
 }
 
@@ -293,6 +301,87 @@ func tables(ctx context.Context, args []string) error {
 			fmt.Printf("page %d, table %d: %d rows, %d columns, found from %s, confidence %.2f\n\n%s\n\n",
 				page.Number, i+1, t.Rows, t.Cols, t.Method, t.Confidence, t.Markdown())
 		}
+	}
+	return nil
+}
+
+// images lists the images of each page, one per line, and with -out writes
+// each to a file in that directory.
+func images(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("images", flag.ExitOnError)
+	password := fs.String("password", "", "password for an encrypted file")
+	first := fs.Int("first", 1, "first page")
+	last := fs.Int("last", 0, "last page (0 for the last page of the document)")
+	all := fs.Bool("all", false, "include small images and images repeated from page to page")
+	dir := fs.String("out", "", "directory to write the images to")
+	fs.Parse(args)
+	if fs.NArg() != 1 {
+		usage()
+	}
+	doc, err := unpdf.OpenFile(ctx, fs.Arg(0), unpdf.Options{Password: *password})
+	if err != nil {
+		return err
+	}
+	defer doc.Close()
+	if *dir != "" {
+		if err := os.MkdirAll(*dir, 0o755); err != nil {
+			return err
+		}
+	}
+	failed := 0
+	for page, err := range doc.Pages(ctx) {
+		if err != nil {
+			return err
+		}
+		if page.Number < *first {
+			continue
+		}
+		if *last > 0 && page.Number > *last {
+			break
+		}
+		found, err := page.Images(ctx, unpdf.ImageOptions{Small: *all, Repeated: *all})
+		if err != nil {
+			return err
+		}
+		for i := range found {
+			img := &found[i]
+			var notes []string
+			for note, set := range map[string]bool{"stencil": img.Stencil, "masked": img.Masked, "inline": img.Inline, "small": img.Small, "repeated": img.Repeated} {
+				if set {
+					notes = append(notes, note)
+				}
+			}
+			slices.Sort(notes)
+			space := img.ColorSpace
+			if space == "" {
+				space = "-"
+			}
+			fmt.Printf("page %d, image %d: %d x %d pixels, %s, %d bits, %s, at %.0f,%.0f to %.0f,%.0f%s\n",
+				page.Number, i+1, img.Width, img.Height, space, img.BitsPerComponent, img.Format,
+				img.Box.X0, img.Box.Y0, img.Box.X1, img.Box.Y1, strings.Join(append([]string{""}, notes...), ", "))
+			if *dir == "" {
+				continue
+			}
+			data, err := img.Extract(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					return err
+				}
+				fmt.Fprintf(os.Stderr, "page %d, image %d: %v\n", page.Number, i+1, err)
+				failed++
+				continue
+			}
+			name := filepath.Join(*dir, fmt.Sprintf("page-%04d-image-%03d%s", page.Number, i+1, img.Format.Extension()))
+			if err := os.WriteFile(name, data, 0o644); err != nil {
+				return err
+			}
+		}
+	}
+	for _, w := range doc.Warnings() {
+		fmt.Fprintf(os.Stderr, "warning [%s]: %s\n", w.Code, w.Message)
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d images could not be extracted", failed)
 	}
 	return nil
 }

@@ -275,12 +275,18 @@ func (p *Parser) ContentNext() (Object, string, error) {
 	return obj, "", err
 }
 
-// SkipInlineImage is called after the ID operator of an inline image. It
-// moves past the image data and its closing EI operator, and returns the
-// number of data bytes skipped.
-func (p *Parser) SkipInlineImage() int {
+// InlineImage is called after the ID operator of an inline image. It moves
+// past the image data and its closing EI operator, and returns the data: a
+// part of the slice being parsed, or nil when the parser reads from a file.
+// An end of line between the data and EI is left out.
+//
+// Binary data can hold the letters EI by chance, so the end of the data is
+// a guess unless its length is known. Pass the length when the image
+// dictionary gives it away, as it does for an image with no filter, and -1
+// otherwise.
+func (p *Parser) InlineImage(size int) []byte {
 	p.queue = p.buf[:0]
-	return p.lex.skipInlineImage()
+	return p.lex.inlineImage(size)
 }
 
 // operators holds the content stream operators as ready-made strings.

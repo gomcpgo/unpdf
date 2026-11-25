@@ -1,9 +1,9 @@
 // Copyright 2026 The unpdf Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// Package unpdf reads PDF files: their metadata, pages and text today, and
-// their structure, tables and images as the package grows. It is written in
-// pure Go, with no cgo and no external programs.
+// Package unpdf reads PDF files: their metadata, pages, text, structure,
+// tables and images. It is written in pure Go, with no cgo and no external
+// programs.
 //
 // PDFs are treated as untrusted input. Every parser checks bounds, and the
 // Limits in Options cap how much memory a document can make the package
@@ -58,6 +58,21 @@
 // Document.Outline, Document.FormFields, Page.Links and Page.Annotations
 // return the bookmarks, the form fields with their values, the links and
 // the comments.
+//
+// # Images
+//
+// Page.Images returns the images on a page, each with its position and its
+// size in pixels, and Image.Extract the bytes of one: the JPEG file the
+// document holds, or a PNG file made from the image's samples, with a mask
+// as its alpha channel. JPEG 2000, JBIG2 and CCITT fax images are returned
+// as the document holds them, not decoded. Small images and images that
+// repeat from page to page, such as a logo, are left out unless asked for.
+//
+//	images, err := page.Images(ctx, unpdf.ImageOptions{})
+//	for _, img := range images {
+//		data, err := img.Extract(ctx)
+//		// img.Format says what data is; img.Box where the image is
+//	}
 //
 // Glyphs that a font gives no Unicode mapping for appear as U+FFFD; the
 // document's warnings then say which font and how many glyphs, so a caller
