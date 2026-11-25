@@ -64,30 +64,60 @@ func Aligned(words []Word, lines []Line, rules []Rule) ([]Table, []int) {
 			start++
 			continue
 		}
-		// Extend the run while lines follow each other closely. Lines
-		// without a gap may sit inside a table: a cell's second line, or a
-		// label across the full width.
+		// Extend the run while lines follow each other closely. A line
+		// with no wide gap may still be part of the table: the next line
+		// of a cell that runs to several, which keeps within one column.
+		// A line of prose does not: it runs across the columns, and ends
+		// the table. Until two lines have shown where the columns are,
+		// a line or two with no gap is let through.
 		end := start + 1
-		lastTabular := start
-		for end < len(lines) {
+		tab := []int{start}
+		var columns [][2]float64
+		sepsFor := 0
+		x0, x1, size := extent(words, lines[start:end])
+		for end < len(lines) && end-start < maxRows {
 			prev, cur := lines[end-1], lines[end]
-			size := lineSize(words, cur)
-			if cur.Y0 < prev.Y0-size || cur.Y0-prev.Y1 > rowPitch*size {
+			sz := lineSize(words, cur)
+			if cur.Y0 < prev.Y0-sz || cur.Y0-prev.Y1 > rowPitch*sz {
 				break
 			}
 			if tabular[end] {
-				lastTabular = end
-			} else if end-lastTabular >= 3 {
+				tab = append(tab, end)
+				end++
+				continue
+			}
+			if len(tab) < 2 {
+				if end-tab[0] >= 3 {
+					break
+				}
+				end++
+				continue
+			}
+			if sepsFor == 0 || len(tab) >= sepsFor+sepsFor/4+1 {
+				sample := make([]Line, 0, len(tab))
+				for _, i := range tab[max(0, len(tab)-60):] {
+					sample = append(sample, lines[i])
+				}
+				x0, x1, size = extent(words, sample)
+				columns, sepsFor = columnExtents(words, sample, separators(words, sample, x0, x1, size)), len(tab)
+			}
+			if cur.X0 < x0-sz || cur.X1 > x1+sz || bridges(words, cur, columns) {
 				break
 			}
 			end++
 		}
-		end = lastTabular + 1
-		// A cell may run to many lines while the cells beside it are
-		// done: lines with no gap in them, which the count above gives up
-		// on. They belong to the table as long as each keeps within one of
-		// its columns.
-		end = extend(words, lines, start, end)
+		// Lines with no gap at the end are kept only if they sit close
+		// under the table, as the last lines of a cell do.
+		for end-1 > tab[len(tab)-1] {
+			last, before := lines[end-1], lines[end-2]
+			if len(tab) >= 2 && last.Y0-before.Y1 <= 1.5*lineSize(words, last) {
+				break
+			}
+			end--
+		}
+		if len(tab) < 2 {
+			end = tab[len(tab)-1] + 1
+		}
 		if t, ok := align(words, lines[start:end], hs); ok {
 			for i := start; i < end; i++ {
 				member[i] = len(tables)
@@ -110,37 +140,38 @@ func lineSize(words []Word, l Line) float64 {
 	return size
 }
 
-// extend lengthens the run of lines [start, end) by the lines after it that
-// follow closely, stay inside the run's width and cross none of its column
-// gaps, and by the tabular lines that follow those.
-func extend(words []Word, lines []Line, start, end int) int {
-	if end-start < 2 {
-		return end
+// columnExtents returns where the text of each column lies in some lines,
+// given the middles of the gaps between the columns.
+func columnExtents(words []Word, lines []Line, seps []float64) [][2]float64 {
+	out := make([][2]float64, len(seps)+1)
+	for c := range out {
+		out[c] = [2]float64{math.Inf(1), math.Inf(-1)}
 	}
-	x0, x1, size := extent(words, lines[start:end])
-	seps := separators(words, lines[start:end], x0, x1, size)
-	if len(seps) == 0 {
-		return end
-	}
-	for end < len(lines) && end-start < maxRows {
-		prev, cur := lines[end-1], lines[end]
-		sz := lineSize(words, cur)
-		if cur.Y0 < prev.Y0-sz || cur.Y0-prev.Y1 > 1.5*sz || cur.X0 < x0-sz || cur.X1 > x1+sz {
-			break
-		}
-		crosses := false
-		for _, i := range cur.Words {
+	for _, l := range lines {
+		for _, i := range l.Words {
 			w := words[i]
-			for _, s := range seps {
-				crosses = crosses || (w.X0 < s-1 && w.X1 > s+1)
+			c := sort.SearchFloat64s(seps, (w.X0+w.X1)/2)
+			out[c][0], out[c][1] = math.Min(out[c][0], w.X0), math.Max(out[c][1], w.X1)
+		}
+	}
+	return out
+}
+
+// bridges reports whether a line with no wide gap in it runs across
+// columns: it has words where the text of two of them lies. A label too
+// long for its column runs into the gap beside it, but not into the next
+// column's text.
+func bridges(words []Word, l Line, columns [][2]float64) bool {
+	touched := 0
+	for _, col := range columns {
+		for _, i := range l.Words {
+			if w := words[i]; w.X0 < col[1] && w.X1 > col[0] {
+				touched++
+				break
 			}
 		}
-		if crosses {
-			break
-		}
-		end++
 	}
-	return end
+	return touched >= 2
 }
 
 // extent returns the horizontal extent of some lines and their largest

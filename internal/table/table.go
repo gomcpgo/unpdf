@@ -362,6 +362,11 @@ func grid(words []Word, hs []hline, vs []vline) (Table, bool) {
 
 	// Put the words in their cells, by where the middle of each falls.
 	inside := 0
+	type rowWord struct {
+		mid, height float64
+		cell        int
+	}
+	rowWords := make([][]rowWord, rows)
 	for i, w := range words {
 		mx, my := (w.X0+w.X1)/2, (w.Y0+w.Y1)/2
 		if mx < t.X0 || mx > t.X1 || my < t.Y0 || my > t.Y1 {
@@ -374,6 +379,7 @@ func grid(words []Word, hs []hline, vs []vline) (Table, bool) {
 		}
 		cell := &t.Cells[owner[id(r, c)]]
 		cell.Words = append(cell.Words, i)
+		rowWords[r] = append(rowWords[r], rowWord{my, w.Y1 - w.Y0, owner[id(r, c)]})
 		inside++
 	}
 	if inside == 0 {
@@ -449,6 +455,43 @@ func grid(words []Word, hs []hline, vs []vline) (Table, bool) {
 	case covered*2 < usedRows*usedCols:
 		t.Confidence = math.Min(t.Confidence, 0.45)
 	}
+	// A cell merged down several rows whose text stands on the last of
+	// them, on the line of that row's own text, belongs to that row: a
+	// heading set at the foot of its box, or a label under a stretch with
+	// no rule. Where it is, not where its box starts, is its row.
+	for i := range t.Cells {
+		c := &t.Cells[i]
+		last := c.Row + c.RowSpan - 1
+		if c.RowSpan < 2 || len(c.Words) == 0 {
+			continue
+		}
+		mine, lowest, others := math.Inf(-1), math.Inf(-1), 0
+		height := 0.0
+		elsewhere := false
+		for r := c.Row; r <= last; r++ {
+			for _, w := range rowWords[r] {
+				switch {
+				case w.cell != i && r == last:
+					others++
+					lowest = math.Max(lowest, w.mid)
+				case w.cell == i && r == last:
+					mine, height = math.Max(mine, w.mid), w.height
+				case w.cell == i:
+					elsewhere = true
+				}
+			}
+		}
+		if elsewhere || math.IsInf(mine, -1) || (others > 0 && math.Abs(mine-lowest) > 0.5*height) {
+			continue
+		}
+		c.Row, c.RowSpan, c.Y0 = last, 1, ys[last]
+	}
+	sort.SliceStable(t.Cells, func(i, j int) bool {
+		if t.Cells[i].Row != t.Cells[j].Row {
+			return t.Cells[i].Row < t.Cells[j].Row
+		}
+		return t.Cells[i].Col < t.Cells[j].Col
+	})
 	t.HeaderRows = headerRows(words, &t)
 	return t, true
 }
@@ -519,11 +562,18 @@ func headerRows(words []Word, t *Table) int {
 // splitBands adds row boundaries inside the bands of a grid whose rows no
 // rule separates. Many tables rule off the columns and the header and
 // leave the rows of figures to white space; between two of its horizontal
-// rules such a table has a whole stack of rows. A band is split, one row
-// per line of text, when it holds three or more lines and its columns keep
-// step: at least two of them, and half of those with text, have a word on
-// nearly every line. A band of cells whose text merely wraps does not keep
-// step like that, or reads as prose and is left whole.
+// rules such a table has a whole stack of rows.
+//
+// A band is split, one row per line of text, when its columns keep step:
+// at least two of them, and half of those with text, have a word on nearly
+// every line. Three lines are enough, or two if they hold figures. A band
+// of cells whose text merely wraps does not keep step like that, or reads
+// as prose and is left whole. Within a band that is split, a line that
+// holds one column's text only and is set closer to the next line than rows
+// are is the second line of a label, and stays with its row.
+//
+// A band that does not keep step may still hold two rows: a line that
+// names a group ("Farm income:") above the first row of the group.
 //
 // It returns the boundaries and, for each, whether it was added here.
 func splitBands(words []Word, xs, ys []float64) ([]float64, []bool) {
@@ -544,72 +594,150 @@ func splitBands(words []Word, xs, ys []float64) ([]float64, []bool) {
 		}
 		bands[r] = append(bands[r], placed{my, w.Y0, w.Y1, c, i})
 	}
+	// textLine is one line of text across a band.
+	type textLine struct {
+		top, bottom float64
+		cols        map[int]bool
+		from, to    map[int]float64 // extent of the text in each column
+		first, last map[int]int     // leftmost and rightmost word in each column
+	}
+	mid := func(l *textLine) float64 { return (l.top + l.bottom) / 2 }
 	out := []float64{ys[0]}
 	virtual := []bool{false}
 	for r, band := range bands {
-		if len(band) >= 6 {
+		var lines []*textLine
+		numeric := 0
+		if len(band) >= 2 {
 			sort.Slice(band, func(i, j int) bool { return band[i].mid < band[j].mid })
-			// Cluster the words into lines.
-			type textLine struct {
-				top, bottom float64
-				cols        map[int]bool
-				wide        map[int]float64 // extent of the text per column
-				from        map[int]float64
-			}
-			var lines []*textLine
-			numeric := 0
 			for _, pw := range band {
 				n := len(lines)
-				if n == 0 || pw.mid > (lines[n-1].top+lines[n-1].bottom)/2+0.6*(pw.bottom-pw.top) {
-					lines = append(lines, &textLine{pw.top, pw.bottom, map[int]bool{}, map[int]float64{}, map[int]float64{}})
+				if n == 0 || pw.mid > mid(lines[n-1])+0.6*(pw.bottom-pw.top) {
+					lines = append(lines, &textLine{pw.top, pw.bottom, map[int]bool{}, map[int]float64{}, map[int]float64{}, map[int]int{}, map[int]int{}})
 					n++
 				}
 				l := lines[n-1]
 				l.top, l.bottom = math.Min(l.top, pw.top), math.Max(l.bottom, pw.bottom)
 				w := words[pw.word]
-				if !l.cols[pw.col] {
-					l.from[pw.col], l.wide[pw.col] = w.X0, w.X1
+				if !l.cols[pw.col] || w.X0 < l.from[pw.col] {
+					l.from[pw.col], l.first[pw.col] = w.X0, pw.word
 				}
-				l.from[pw.col], l.wide[pw.col] = math.Min(l.from[pw.col], w.X0), math.Max(l.wide[pw.col], w.X1)
+				if !l.cols[pw.col] || w.X1 > l.to[pw.col] {
+					l.to[pw.col], l.last[pw.col] = w.X1, pw.word
+				}
 				l.cols[pw.col] = true
 				if isNumeric(w.Text) {
 					numeric++
 				}
 			}
-			k := len(lines)
-			if k >= 3 && k <= maxGridDim {
-				perCol := make([]int, cols)
-				for _, l := range lines {
-					for c := range l.cols {
-						perCol[c]++
+		}
+		k := len(lines)
+		cut := make([]bool, k) // cut[i]: a row boundary above line i
+		if k >= 2 && k <= maxGridDim {
+			perCol := make([]int, cols)
+			for _, l := range lines {
+				for c := range l.cols {
+					perCol[c]++
+				}
+			}
+			withText, inStep, wrapped := 0, 0, false
+			for c, n := range perCol {
+				if n == 0 {
+					continue
+				}
+				withText++
+				if n*10 < k*7 {
+					continue
+				}
+				inStep++
+				// Prose that wraps fills the width of its column on
+				// most lines.
+				full := 0
+				for _, l := range lines[:k-1] {
+					if l.cols[c] && l.to[c]-l.from[c] >= 0.8*(xs[c+1]-xs[c]) {
+						full++
 					}
 				}
-				withText, inStep, wrapped := 0, 0, false
-				for c, n := range perCol {
-					if n == 0 {
+				wrapped = wrapped || full*2 >= k-1
+			}
+			figures := numeric*10 >= len(band)*4
+			inStepEnough := inStep >= 2 && inStep*2 >= withText && len(band) >= 6
+			switch {
+			case inStepEnough && (k >= 3 && (figures || !wrapped) || k == 2 && figures):
+				for i := 1; i < k; i++ {
+					cut[i] = true
+				}
+				// The usual distance from one line to the next.
+				gaps := make([]float64, 0, k-1)
+				for i := 1; i < k; i++ {
+					gaps = append(gaps, mid(lines[i])-mid(lines[i-1]))
+				}
+				sort.Float64s(gaps)
+				pitch := gaps[len(gaps)/2]
+				for i, l := range lines {
+					if len(l.cols) != 1 {
 						continue
 					}
-					withText++
-					if n*10 < k*7 {
-						continue
+					above, below := math.Inf(1), math.Inf(1)
+					if i > 0 {
+						above = mid(l) - mid(lines[i-1])
 					}
-					inStep++
-					// Prose that wraps fills the width of its column on
-					// most lines.
-					full := 0
-					for _, l := range lines[:k-1] {
-						if l.cols[c] && l.wide[c]-l.from[c] >= 0.8*(xs[c+1]-xs[c]) {
-							full++
+					if i+1 < k {
+						below = mid(lines[i+1]) - mid(l)
+					}
+					switch {
+					case above < 0.75*pitch && above <= below:
+						cut[i] = false
+					case below < 0.75*pitch:
+						cut[i+1] = false
+					}
+				}
+			default:
+				// One line with text in several columns, under lines with
+				// text in one column only, the same one, where that line
+				// has text of its own: a heading for the rows that follow,
+				// unless it reads as the start of the line's own label.
+				f := -1
+				for i, l := range lines {
+					if len(l.cols) >= 2 {
+						if f >= 0 {
+							f = -2
+							break
 						}
-					}
-					wrapped = wrapped || full*2 >= k-1
-				}
-				if inStep >= 2 && inStep*2 >= withText && (numeric*10 >= len(band)*4 || !wrapped) {
-					for i := 1; i < k; i++ {
-						out = append(out, (lines[i-1].bottom+lines[i].top)/2)
-						virtual = append(virtual, true)
+						f = i
 					}
 				}
+				if f < 1 {
+					break
+				}
+				label := lines[f-1]
+				c := -1
+				for col := range label.cols {
+					c = col
+				}
+				// Only in the first column with text, where row labels
+				// are: elsewhere it is a column heading of two lines.
+				ok := lines[f].cols[c]
+				for col := range lines[f].cols {
+					ok = ok && col >= c
+				}
+				for _, l := range lines[:f] {
+					ok = ok && len(l.cols) == 1 && l.cols[c]
+				}
+				if !ok {
+					break
+				}
+				start := []rune(words[lines[f].first[c]].Text)
+				fills := label.to[c]-label.from[c] >= 0.8*(xs[c+1]-xs[c])
+				if strings.HasSuffix(words[label.last[c]].Text, ":") ||
+					(len(start) > 0 && (unicode.IsUpper(start[0]) || unicode.IsDigit(start[0])) && !fills) {
+					cut[f] = true
+				}
+			}
+		}
+		for i := 1; i < k; i++ {
+			if cut[i] {
+				out = append(out, (lines[i-1].bottom+lines[i].top)/2)
+				virtual = append(virtual, true)
 			}
 		}
 		out = append(out, ys[r+1])

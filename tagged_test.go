@@ -255,3 +255,36 @@ func TestHeadingNumber(t *testing.T) {
 		}
 	}
 }
+
+func TestTaggedTitleRow(t *testing.T) {
+	// Some producers tag a table's title as its first row: one cell. Here
+	// the first row keeps only "Team", and the other two cells become
+	// part of the first paragraph.
+	doc := taggedDoc(t, "<< /Marked true >>", "", func(b *pdftest.Builder, e map[string]int) {
+		b.Set(e["r1"], fmt.Sprintf("<< /S /TR /P %d 0 R /K [%d 0 R] >>", e["tb"], e["th1"]))
+		b.Set(e["th2"], fmt.Sprintf("<< /S /Span /P %d 0 R /K 6 >>", e["p1"]))
+		b.Set(e["th3"], fmt.Sprintf("<< /S /Span /P %d 0 R /K 7 >>", e["p1"]))
+	})
+	p, _ := doc.Page(ctx, 1)
+	tables, err := p.Tables(ctx)
+	if err != nil || len(tables) != 1 {
+		t.Fatalf("tables = %+v, %v", tables, err)
+	}
+	if got, want := tables[0].Grid(), [][]string{{"Support", "", "97"}, {"Total staff", "", "455"}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("grid = %q", got)
+	}
+	// The title is a block of its own, not a line of the table's block.
+	blocks, _ := p.Blocks(ctx)
+	var texts []string
+	for _, b := range blocks {
+		texts = append(texts, b.Text())
+	}
+	joined := strings.Join(texts, " / ")
+	if !strings.Contains(joined, " / Team / Support 97\nTotal staff 455 / ") {
+		t.Errorf("blocks = %q", joined)
+	}
+	md, _ := doc.Markdown(ctx, MarkdownOptions{OmitPageMarkers: true})
+	if !strings.Contains(md, "\n\nTeam\n\n| Support | 97 |\n| --- | --- |\n| Total staff | 455 |\n\n") {
+		t.Errorf("Markdown:\n%s", md)
+	}
+}

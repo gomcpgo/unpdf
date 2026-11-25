@@ -271,9 +271,12 @@ func (p *Page) Tables(ctx context.Context) ([]Table, error) {
 		made := Table{Box: Box{t.X0, t.Y0, t.X1, t.Y1}, Rows: t.Rows, Cols: t.Cols, HeaderRows: t.HeaderRows,
 			Confidence: math.Round(t.Confidence*100) / 100, Method: t.Method, Cells: make([]TableCell, len(t.Cells))}
 		for k, c := range t.Cells {
-			made.Cells[k] = TableCell{Row: c.Row, Col: c.Col, RowSpan: c.RowSpan, ColSpan: c.ColSpan, Box: Box{c.X0, c.Y0, c.X1, c.Y1}, Text: c.Text}
+			made.Cells[k] = TableCell{Row: c.Row, Col: c.Col, RowSpan: c.RowSpan, ColSpan: c.ColSpan, Box: Box{c.X0, c.Y0, c.X1, c.Y1}, Text: cleanCell(c.Text)}
 		}
-		out = append(out, made)
+		trimRows(&made)
+		if made.Rows > 0 {
+			out = append(out, made)
+		}
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if math.Abs(out[i].Box.Y0-out[j].Box.Y0) > 1 {
@@ -283,6 +286,122 @@ func (p *Page) Tables(ctx context.Context) ([]Table, error) {
 	})
 	p.tables, p.tabled = out, true
 	return out, nil
+}
+
+// cleanCell takes out of a cell's text what leads the eye and says nothing:
+// the row of dots that runs from a label to its figures, or stands in a
+// cell that has no figure.
+func cleanCell(text string) string {
+	lines := strings.Split(text, "\n")
+	out := lines[:0]
+	for _, l := range lines {
+		if l = strings.TrimSpace(trimLeaders(l)); l != "" {
+			out = append(out, l)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// trimLeaders removes a run of three or more dots, with or without spaces
+// between them, from the end of a line and from its start.
+func trimLeaders(s string) string {
+	isDot := func(r byte) bool { return r == '.' || r == ' ' }
+	end, dots := len(s), 0
+	for end > 0 && isDot(s[end-1]) {
+		if s[end-1] == '.' {
+			dots++
+		}
+		end--
+	}
+	if dots >= 3 {
+		s = s[:end]
+	}
+	start, dots := 0, 0
+	for start < len(s) && isDot(s[start]) {
+		if s[start] == '.' {
+			dots++
+		}
+		start++
+	}
+	if dots >= 3 {
+		s = s[start:]
+	}
+	return s
+}
+
+// trimRows takes off the top and the bottom of a table the rows that are
+// not rows of it: a title above the header and notes below the last row,
+// which some documents draw inside the table's outer box or tag as rows.
+// Such a row has text in its first cell only, and that cell runs the width
+// of the table or is the only one the row has. The table's box shrinks to
+// the rows that are left, so that the text taken off reads as text around
+// the table. It returns the cells taken off.
+func trimRows(t *Table) []TableCell {
+	if t.Cols < 2 {
+		return nil
+	}
+	type rowInfo struct {
+		cells, filled int
+		first         *TableCell // the cell with text, when there is one
+	}
+	info := make([]rowInfo, t.Rows)
+	for i := range t.Cells {
+		c := &t.Cells[i]
+		if c.Row < 0 || c.Row >= t.Rows {
+			continue
+		}
+		info[c.Row].cells++
+		if c.Text != "" {
+			info[c.Row].filled++
+			info[c.Row].first = c
+		}
+	}
+	apart := func(r int) bool {
+		in := info[r]
+		return in.filled == 1 && in.first.Col == 0 && (in.first.ColSpan >= t.Cols || in.cells == 1)
+	}
+	empty := func(r int) bool { return info[r].filled == 0 }
+	// At least two rows must be left for there to be a table. Empty rows
+	// go with a title or a note beside them, and are no reason on their
+	// own to cut anything.
+	top, bottom := 0, t.Rows
+	title, note := false, false
+	for top < bottom-2 && (apart(top) || empty(top)) {
+		title = title || apart(top)
+		top++
+	}
+	if !title {
+		top = 0
+	}
+	for bottom > top+2 && (apart(bottom-1) || empty(bottom-1)) {
+		note = note || apart(bottom-1)
+		bottom--
+	}
+	if !note {
+		bottom = t.Rows
+	}
+	if top == 0 && bottom == t.Rows {
+		return nil
+	}
+	var kept, cut []TableCell
+	box := Box{math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)}
+	for _, c := range t.Cells {
+		if c.Row < top || c.Row >= bottom {
+			cut = append(cut, c)
+			continue
+		}
+		c.Row -= top
+		c.RowSpan = min(c.RowSpan, bottom-top-c.Row)
+		kept = append(kept, c)
+		box.X0, box.Y0 = math.Min(box.X0, c.Box.X0), math.Min(box.Y0, c.Box.Y0)
+		box.X1, box.Y1 = math.Max(box.X1, c.Box.X1), math.Max(box.Y1, c.Box.Y1)
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	t.Cells, t.Rows, t.Box = kept, bottom-top, box
+	t.HeaderRows = max(0, min(t.HeaderRows-top, t.Rows-1))
+	return cut
 }
 
 // mirror renumbers the columns of a table on a right-to-left page, where

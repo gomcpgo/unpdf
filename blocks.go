@@ -131,7 +131,7 @@ func (p *Page) Blocks(ctx context.Context) ([]Block, error) {
 				// documents tag text as a heading to make it look like one.
 				kind = Paragraph
 			}
-			if kind != Paragraph || g.cell != 0 {
+			if kind != Paragraph || (g.cell != 0 && !p.looseCells[g.cell]) {
 				// A table cell is fixed too: its bold header is no heading.
 				out[i].Kind, out[i].Level, out[i].fixed = kind, g.level, true
 			}
@@ -257,6 +257,18 @@ func (p *Page) display(g *content.Glyph, out *layout.Glyph) {
 	out.Text, out.Advance, out.Size, out.Artifact = g.Text, math.Hypot(g.DX, g.DY), g.Size, g.Artifact
 	if !g.Mapped {
 		out.Text = string(unicode.ReplacementChar)
+	} else if strings.IndexFunc(out.Text, unicode.IsControl) >= 0 {
+		// A font may map a glyph to a control character, a backspace to
+		// pull a row of dots back, say. It is not text.
+		out.Text = strings.Map(func(r rune) rune {
+			switch {
+			case r == '\t' || r == '\n' || r == '\r':
+				return ' '
+			case unicode.IsControl(r):
+				return -1
+			}
+			return r
+		}, out.Text)
 	}
 	if g.Font != nil {
 		out.Font, out.Bold, out.Italic = g.Font.Name, g.Font.Bold, g.Font.Italic

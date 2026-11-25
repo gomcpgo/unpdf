@@ -460,7 +460,7 @@ func (p *Page) taggedTables(laid []layout.Block) []Table {
 			continue
 		}
 		g := &p.tags.groups[b.Group-1]
-		if g.table == 0 {
+		if g.table == 0 || b.Angle != 0 {
 			continue
 		}
 		t := parts[g.table]
@@ -531,6 +531,7 @@ func (p *Page) taggedTables(laid []layout.Block) []Table {
 
 		table := Table{Method: TableFromStructure, Confidence: 0.95, Box: cells[0].box}
 		taken := map[[2]int]bool{}
+		elems := map[[2]int]int{} // the element of the cell placed at a row and column
 		row, col, last := -1, 0, int32(-1)
 		rowElem := 0
 		headers := true
@@ -568,7 +569,8 @@ func (p *Page) taggedTables(laid []layout.Block) []Table {
 				}
 			}
 			table.Cells = append(table.Cells, TableCell{Row: row, Col: col, RowSpan: rowSpan, ColSpan: colSpan,
-				Box: c.box, Text: strings.Join(c.text, "\n")})
+				Box: c.box, Text: cleanCell(strings.Join(c.text, "\n"))})
+			elems[[2]int{row, col}] = g.cell
 			table.Rows, table.Cols = max(table.Rows, row+1), max(table.Cols, col+colSpan)
 			table.Box.X0, table.Box.Y0 = min(table.Box.X0, c.box.X0), min(table.Box.Y0, c.box.Y0)
 			table.Box.X1, table.Box.Y1 = max(table.Box.X1, c.box.X1), max(table.Box.Y1, c.box.Y1)
@@ -576,6 +578,14 @@ func (p *Page) taggedTables(laid []layout.Block) []Table {
 		}
 		if table.HeaderRows == table.Rows {
 			table.HeaderRows = 0 // every row a heading: no word on which are
+		}
+		// A title and notes tagged as rows of the table are text around it.
+		// Their places are looked up before the cells are moved about.
+		for _, c := range trimRows(&table) {
+			if p.looseCells == nil {
+				p.looseCells = map[int]bool{}
+			}
+			p.looseCells[elems[[2]int{c.Row, c.Col}]] = true
 		}
 		if !rtl {
 			settleColumns(&table)
@@ -679,7 +689,14 @@ func (p *Page) foldRows(blocks []layout.Block) []layout.Block {
 		if b.Group <= 0 || b.Group > len(p.tags.groups) {
 			return nil
 		}
-		return &p.tags.groups[b.Group-1]
+		g := &p.tags.groups[b.Group-1]
+		if p.looseCells[g.cell] {
+			// A title or a note tagged as a cell: text like any other.
+			loose := *g
+			loose.table, loose.row, loose.cell = 0, 0, 0
+			return &loose
+		}
+		return g
 	}
 	mid := func(l layout.Line) float64 { return (l.Box.Y0 + l.Box.Y1) / 2 }
 	level := func(a, b layout.Line) bool {

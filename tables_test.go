@@ -206,3 +206,107 @@ func TestTableMarkdownEdges(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+func TestCleanCell(t *testing.T) {
+	for in, want := range map[string]string{
+		"Alabama ............................": "Alabama",
+		"Alaska . . . . . . . .":               "Alaska",
+		"................":                     "",
+		"..... 12":                             "12",
+		"St. Louis":                            "St. Louis",
+		"p. 5..":                               "p. 5..",
+		"3.5":                                  "3.5",
+		"etc.":                                 "etc.",
+		"New York .........\n(city) .....":     "New York\n(city)",
+		"first\n.......\nlast":                 "first\nlast",
+		"":                                     "",
+	} {
+		if got := cleanCell(in); got != want {
+			t.Errorf("cleanCell(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestTitleAndNotesAreNotRows(t *testing.T) {
+	// A grid whose top row is one cell across the whole width, holding the
+	// table's title, and whose bottom row is one cell holding a note. The
+	// table is the three rows between; the title and the note are text
+	// before and after it.
+	grid := "0.5 w 72 660 300 -100 re S 72 640 m 372 640 l S 72 620 m 372 620 l S 72 600 m 372 600 l S 72 580 m 372 580 l S " +
+		"172 580 m 172 640 l S 272 580 m 272 640 l S "
+	doc := pagesOf(t, grid+
+		cells(646, 76, "Table 3. Staff by team at the start and end of the quarter")+
+		cells(626, 76, "Team", 176, "Start", 276, "End")+
+		cells(606, 76, "Support ..........", 176, "88", 276, "97")+
+		cells(586, 76, "Sales ............", 176, "204", 276, ".........")+
+		cells(566, 76, "Note: the figures count people and leave out contractors."))
+	p, _ := doc.Page(ctx, 1)
+	tables, _ := p.Tables(ctx)
+	if len(tables) != 1 {
+		t.Fatalf("%d tables", len(tables))
+	}
+	tb := tables[0]
+	// Dot leaders are gone as well, and the cell that held nothing else is
+	// empty.
+	if got, want := tb.Grid(), [][]string{{"Team", "Start", "End"}, {"Support", "88", "97"}, {"Sales", "204", ""}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("grid = %q", got)
+	}
+	if want := (Box{72, 792 - 640, 372, 792 - 580}); tb.Box != want {
+		t.Errorf("box = %+v, want %+v", tb.Box, want)
+	}
+	md, _ := doc.Markdown(ctx, MarkdownOptions{OmitPageMarkers: true})
+	want := "Table 3. Staff by team at the start and end of the quarter\n\n" +
+		"| Team | Start | End |\n| --- | --- | --- |\n| Support | 88 | 97 |\n| Sales | 204 |  |\n\n" +
+		"Note: the figures count people and leave out contractors.\n"
+	if md != want {
+		t.Errorf("Markdown:\n%s", md)
+	}
+}
+
+func TestTrimRows(t *testing.T) {
+	cell := func(row, col, span int, text string) TableCell {
+		return TableCell{Row: row, Col: col, RowSpan: 1, ColSpan: span, Text: text, Box: Box{float64(col), float64(row), float64(col + span), float64(row + 1)}}
+	}
+	// A title, an empty row, two rows, two notes.
+	tb := Table{Rows: 6, Cols: 2, HeaderRows: 3, Cells: []TableCell{
+		cell(0, 0, 2, "Title"), cell(1, 0, 1, ""), cell(1, 1, 1, ""),
+		cell(2, 0, 1, "a"), cell(2, 1, 1, "b"), cell(3, 0, 1, "c"), cell(3, 1, 1, "d"),
+		cell(4, 0, 2, "Note 1"), cell(5, 0, 2, "Note 2"),
+	}}
+	cut := trimRows(&tb)
+	if tb.Rows != 2 || len(tb.Cells) != 4 || tb.Cells[0].Row != 0 || tb.Cells[3].Row != 1 || len(cut) != 5 || tb.HeaderRows != 1 {
+		t.Errorf("after trimming: %d rows, %d cells, %d cut, %d header rows", tb.Rows, len(tb.Cells), len(cut), tb.HeaderRows)
+	}
+	if want := (Box{0, 2, 2, 4}); tb.Box != want {
+		t.Errorf("box = %+v", tb.Box)
+	}
+	// Two rows are the least a table has: nothing is taken from this one,
+	// though its first row is one cell across.
+	small := Table{Rows: 2, Cols: 2, Cells: []TableCell{cell(0, 0, 2, "Heading over both"), cell(1, 0, 1, "a"), cell(1, 1, 1, "b")}}
+	if cut := trimRows(&small); cut != nil || small.Rows != 2 {
+		t.Errorf("a table of two rows was cut to %d", small.Rows)
+	}
+	// A heading over some of the columns is a heading, not a title, and a
+	// label in the middle of the table is a row.
+	kept := Table{Rows: 4, Cols: 3, Cells: []TableCell{
+		cell(0, 1, 2, "Both years"), cell(1, 0, 1, "x"), cell(1, 1, 1, "1"), cell(1, 2, 1, "2"),
+		cell(2, 0, 3, "Addenda:"), cell(3, 0, 1, "y"), cell(3, 1, 1, "3"), cell(3, 2, 1, "4"),
+	}}
+	if cut := trimRows(&kept); cut != nil || kept.Rows != 4 {
+		t.Errorf("rows that belong were cut: %d left", kept.Rows)
+	}
+}
+
+func TestControlCharactersAreNotText(t *testing.T) {
+	// A font that maps a glyph to a backspace, as one producer does for
+	// the glyph that pulls a row of dots back, and another to a tab.
+	b := pdftest.New()
+	tu := b.AddStream("<< >>", []byte("3 beginbfchar <41> <0041> <42> <0008> <43> <0009> endbfchar"))
+	f := b.Add(fmt.Sprintf(`<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode %d 0 R >>`, tu))
+	b.Pages(pdftest.PageSpec{Content: "BT /F1 12 Tf 72 700 Td (ABACA) Tj ET", Resources: fmt.Sprintf("<< /Font << /F1 %d 0 R >> >>", f)})
+	doc := openBytes(t, b.Bytes(), Options{})
+	p, _ := doc.Page(ctx, 1)
+	if text, _ := p.Text(ctx); text != "AA A" {
+		t.Errorf("text = %q", text)
+	}
+}

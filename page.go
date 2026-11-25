@@ -57,6 +57,9 @@ type Page struct {
 	// laid out by it, and structTables the tables it marks.
 	tags         *pageTags
 	structTables []Table
+	// looseCells holds the elements of table cells that turned out to be a
+	// title or notes, not cells of the table.
+	looseCells map[int]bool
 	// objNum is the number of the page object, 0 when it is not an
 	// indirect object. Destinations refer to pages by it.
 	objNum int

@@ -486,3 +486,174 @@ func FuzzTables(f *testing.F) {
 		}
 	})
 }
+
+func TestRuledGroupHeadings(t *testing.T) {
+	// Every band holds a heading for a group and the first row of the
+	// group, with no rule between them; the next band holds the second
+	// row. The heading is a row of its own.
+	p := &page{}
+	xs := []float64{40, 250, 330, 410}
+	ys := []float64{100, 120, 152, 168, 200, 216}
+	p.grid(xs, ys)
+	p.text(114, 45, "Item", 255, "2021", 335, "2022")
+	p.text(134, 45, "Farm net income:")
+	p.text(146, 55, "Number of returns", 255, "452,295", 335, "510,620")
+	p.text(162, 55, "Amount", 255, "13,618", 335, "17,213")
+	p.text(182, 45, "Unemployment compensation:")
+	p.text(194, 55, "Number of returns", 255, "15,590", 335, "4,664")
+	p.text(210, 55, "Amount", 255, "205,860", 335, "29,554")
+	tables := Ruled(p.words, p.rules)
+	if len(tables) != 1 {
+		t.Fatalf("%d tables", len(tables))
+	}
+	want := [][]string{
+		{"Item", "2021", "2022"},
+		{"Farm net income:", "", ""},
+		{"Number of returns", "452,295", "510,620"},
+		{"Amount", "13,618", "17,213"},
+		{"Unemployment compensation:", "", ""},
+		{"Number of returns", "15,590", "4,664"},
+		{"Amount", "205,860", "29,554"},
+	}
+	if got := rowsOf(tables[0]); !same(got, want) {
+		t.Errorf("rows = %q", got)
+	}
+
+	// A label that wraps, with its figures on the second line, is one row:
+	// the second line goes on in lower case and the first fills the column.
+	q := &page{}
+	q.grid(xs, []float64{100, 120, 152})
+	q.text(114, 45, "Item", 255, "2021", 335, "2022")
+	q.text(134, 45, "Foreign currency exchange rate gains on")
+	q.text(146, 45, "the senior notes", 255, "211", 335, "1,263")
+	tables = Ruled(q.words, q.rules)
+	if len(tables) != 1 || tables[0].Rows != 2 || tables[0].Cells[3].Text != "Foreign currency exchange rate gains on\nthe senior notes" {
+		t.Errorf("wrapped label: %q", rowsOf(tables[0]))
+	}
+
+	// A column heading of two lines, the first of them alone on its line,
+	// is one heading: it is not in the column of row labels.
+	h := &page{}
+	h.grid(xs, []float64{100, 132, 148, 164})
+	h.text(112, 335, "Percent")
+	h.text(124, 45, "Year", 255, "Nominal", 335, "Change")
+	h.text(144, 45, "1949", 255, "0.21", 335, "1.45")
+	h.text(160, 45, "1950", 255, ".21", 335, "1.41")
+	tables = Ruled(h.words, h.rules)
+	if len(tables) != 1 || tables[0].Rows != 3 || tables[0].Cells[2].Text != "Percent\nChange" {
+		t.Errorf("heading of two lines: %q", rowsOf(tables[0]))
+	}
+}
+
+func TestRuledRowsThatShareABand(t *testing.T) {
+	// Five rows of figures with nothing between them. The label of the
+	// third takes two lines, set close together, with its figures between.
+	p := &page{}
+	p.h(100, 40, 350)
+	p.h(120, 40, 350)
+	p.h(230, 40, 350)
+	for _, x := range []float64{40, 200, 280, 350} {
+		p.v(x, 100, 230)
+	}
+	p.text(114, 45, "Series", 205, "Q1", 285, "Q2")
+	p.text(136, 45, "Exports", 205, "1.9", 285, "1.0")
+	p.text(152, 45, "Imports", 205, "6.1", 285, "7.6")
+	p.text(165, 45, "Government consumption")
+	p.text(171, 205, "1.8", 285, "3.1")
+	p.text(177, 45, "and gross investment")
+	p.text(196, 45, "Federal", 205, "-0.4", 285, "4.3")
+	p.text(212, 45, "Addenda:")
+	p.text(226, 45, "Goods", 205, "-3.6", 285, "5.2")
+	tables := Ruled(p.words, p.rules)
+	if len(tables) != 1 {
+		t.Fatalf("%d tables", len(tables))
+	}
+	want := [][]string{
+		{"Series", "Q1", "Q2"},
+		{"Exports", "1.9", "1.0"},
+		{"Imports", "6.1", "7.6"},
+		{"Government consumption\nand gross investment", "1.8", "3.1"},
+		{"Federal", "-0.4", "4.3"},
+		{"Addenda:", "", ""},
+		{"Goods", "-3.6", "5.2"},
+	}
+	if got := rowsOf(tables[0]); !same(got, want) {
+		t.Errorf("rows = %q", got)
+	}
+
+	// Two rows of figures in one band are two rows; two lines of headings
+	// in one band are one.
+	q := &page{}
+	q.grid([]float64{40, 200, 280, 350}, []float64{100, 132, 164})
+	q.text(112, 45, "Age", 205, "Wage in", 285, "Change in")
+	q.text(124, 205, "thousands", 285, "per cent")
+	q.text(144, 45, "Mean age", 205, "44.1", 285, "44.9")
+	q.text(158, 45, "Years of service", 205, "12.4", 285, "13.9")
+	tables = Ruled(q.words, q.rules)
+	want = [][]string{{"Age", "Wage in\nthousands", "Change in\nper cent"}, {"Mean age", "44.1", "44.9"}, {"Years of service", "12.4", "13.9"}}
+	if len(tables) != 1 || !same(rowsOf(tables[0]), want) {
+		t.Errorf("rows that share a band: %q", rowsOf(tables[0]))
+	}
+}
+
+func TestRuledMergedCellOnItsLowerLine(t *testing.T) {
+	// The first column has no rule between the two header rows. "Year"
+	// stands on the line of the second row, so that is its row. "State",
+	// centred between the two, stays in the first.
+	build := func(label string, y float64) [][]string {
+		p := &page{}
+		p.h(100, 40, 350)
+		p.h(120, 200, 350) // stops short of the first column
+		p.h(140, 40, 350)
+		p.h(160, 40, 350)
+		for _, x := range []float64{40, 200, 350} {
+			p.v(x, 100, 160)
+		}
+		p.v(280, 120, 160) // the heading above runs over both columns
+		p.text(114, 205, "Coal prices in both")
+		p.text(y, 45, label)
+		p.text(134, 205, "Nominal", 285, "Real")
+		p.text(154, 45, "1949", 205, "0.21", 285, "1.45")
+		tables := Ruled(p.words, p.rules)
+		if len(tables) != 1 {
+			t.Fatalf("%d tables", len(tables))
+		}
+		return rowsOf(tables[0])
+	}
+	if got, want := build("Year", 134), [][]string{{"", "Coal prices in both", ""}, {"Year", "Nominal", "Real"}, {"1949", "0.21", "1.45"}}; !same(got, want) {
+		t.Errorf("on the lower line: %q", got)
+	}
+	if got, want := build("State", 124), [][]string{{"State", "Coal prices in both", ""}, {"", "Nominal", "Real"}, {"1949", "0.21", "1.45"}}; !same(got, want) {
+		t.Errorf("centred: %q", got)
+	}
+}
+
+func TestAlignedTablesWithACaptionBetween(t *testing.T) {
+	// Two tables, one under the other, with a caption of two lines
+	// between them that runs across the columns. They are two tables, and
+	// the caption is part of neither.
+	p := &page{}
+	p.text(100, 50, "method", 250, "top-1", 320, "top-5")
+	p.text(113, 50, "VGG", 250, "24.4", 320, "7.1")
+	p.text(126, 50, "PReLU-net", 250, "21.59", 320, "5.71")
+	p.text(139, 50, "ResNet-152", 250, "19.38", 320, "4.49")
+	p.text(156, 50, "Table 4. Error rates of single-model results on the ImageNet")
+	p.text(168, 50, "validation set, except where reported on the test set.")
+	p.text(188, 50, "method", 280, "top-5 (test)")
+	p.text(201, 50, "VGG", 280, "7.32")
+	p.text(214, 50, "GoogLeNet", 280, "6.66")
+	p.text(227, 50, "ResNet", 280, "3.57")
+	tables, member := Aligned(p.words, p.lines, nil)
+	if len(tables) != 2 {
+		t.Fatalf("%d tables: %v", len(tables), member)
+	}
+	if got, want := rowsOf(tables[0]), [][]string{{"method", "top-1", "top-5"}, {"VGG", "24.4", "7.1"}, {"PReLU-net", "21.59", "5.71"}, {"ResNet-152", "19.38", "4.49"}}; !same(got, want) {
+		t.Errorf("first table: %q", got)
+	}
+	if got, want := rowsOf(tables[1]), [][]string{{"method", "top-5 (test)"}, {"VGG", "7.32"}, {"GoogLeNet", "6.66"}, {"ResNet", "3.57"}}; !same(got, want) {
+		t.Errorf("second table: %q", got)
+	}
+	if member[4] != -1 || member[5] != -1 {
+		t.Errorf("the caption is in a table: %v", member)
+	}
+}
