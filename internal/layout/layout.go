@@ -993,7 +993,7 @@ func JoinLines(lines [][]string, rtl []bool) string {
 			continue
 		}
 		if len(cur) > 0 && !rtl[i] {
-			if stem, ok := hyphenated(cur[len(cur)-1], next[0]); ok {
+			if stem, ok := Hyphenated(cur[len(cur)-1], next[0]); ok {
 				cur[len(cur)-1] = stem + next[0]
 				lines[i+1] = next[1:]
 				continue
@@ -1010,7 +1010,7 @@ func JoinLines(lines [][]string, rtl []bool) string {
 	return strings.Join(out, "\n")
 }
 
-// hyphenated reports whether last, the final word of a line, was split by
+// Hyphenated reports whether last, the final word of a line, was split by
 // hyphenation and continues with next, the first word of the following
 // line. It returns the word without its hyphen.
 //
@@ -1018,7 +1018,7 @@ func JoinLines(lines [][]string, rtl []bool) string {
 // hyphen does only when lower-case letters stand on both sides of the line
 // break: that leaves out compounds with capitals, numbers, ranges and
 // dashes, at the price of joining a few compounds such as "well-" "known".
-func hyphenated(last, next string) (string, bool) {
+func Hyphenated(last, next string) (string, bool) {
 	r := []rune(last)
 	if len(r) < 2 {
 		return "", false

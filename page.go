@@ -44,11 +44,16 @@ type Page struct {
 
 	// Results kept for the life of the Page value, so that asking for its
 	// text, its blocks and whether it is a scan reads the page once.
-	content   *pageContent
-	blocks    []layout.Block // as laid out
-	marked    []layout.Block // with repeated lines marked as furniture
-	laidOut   bool
-	furnished bool
+	content    *pageContent
+	blocks     []layout.Block // as laid out
+	marked     []layout.Block // with repeated lines marked as furniture
+	laidOut    bool
+	furnished  bool
+	public     []Block // the blocks as Blocks returns them
+	classified bool
+	// objNum is the number of the page object, 0 when it is not an
+	// indirect object. Destinations refer to pages by it.
+	objNum int
 }
 
 // Size returns the width and height of the page as displayed, in points:
@@ -178,7 +183,11 @@ func (d *Document) seek(ctx context.Context, n int) *Page {
 			}
 			if kd["Kids"] == nil {
 				if remaining == 1 {
-					return d.newPage(ctx, n, kd, in.with(kd))
+					p := d.newPage(ctx, n, kd, in.with(kd))
+					if ref, ok := kid.(pdfobj.Ref); ok {
+						p.objNum = ref.Num
+					}
+					return p
 				}
 				remaining--
 				continue
@@ -245,7 +254,11 @@ func (d *Document) walk(ctx context.Context, visit func(*Page) bool) {
 			continue
 		}
 		n++
-		if !visit(d.newPage(ctx, n, node, in)) {
+		page := d.newPage(ctx, n, node, in)
+		if ref, ok := kid.(pdfobj.Ref); ok {
+			page.objNum = ref.Num
+		}
+		if !visit(page) {
 			return
 		}
 		if n >= d.maxPages {

@@ -64,6 +64,17 @@ type Block struct {
 	// page, or that the document itself declares to be an artifact. It is
 	// still returned, so that the caller decides whether to keep it.
 	Furniture bool
+	// Kind says whether the block is a heading, a list item or a paragraph.
+	// It is worked out from the layout: a heading is a short block set
+	// larger or bolder than the body text, a list item starts with a bullet
+	// or a number.
+	Kind BlockKind
+	// Level is the rank of a heading, 1 to 6 with 1 the largest, or the
+	// depth of a list item, 0 for the outermost.
+	Level int
+	// Marker is the bullet or number of a list item, as printed. It is also
+	// the first word of the item's first line.
+	Marker string
 }
 
 // Text returns the text of the block, one line of the page per line of
@@ -84,14 +95,22 @@ func (b Block) Text() string {
 }
 
 // Blocks returns the text of the page as blocks of lines of words, in
-// reading order, each with its position on the page.
+// reading order, each with its position on the page and its kind: heading,
+// list item or paragraph.
 //
 // Reading order is worked out from the layout. A page set in columns is
 // read one column after the other; text that does not form columns of
 // prose, such as a table, is read row by row. Text in other directions,
 // such as a label running up the side, comes after the main text.
 func (p *Page) Blocks(ctx context.Context) ([]Block, error) {
+	if p.classified {
+		return p.public, nil
+	}
 	laid, err := p.layout(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	model, err := p.doc.style(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +125,12 @@ func (p *Page) Blocks(ctx context.Context) ([]Block, error) {
 			out[i].Lines[j] = line
 		}
 	}
-	return out, nil
+	titles, err := p.doc.outlineTitles(ctx, p.Number)
+	if err != nil {
+		return nil, err
+	}
+	p.public, p.classified = classify(out, model, titles), true
+	return p.public, nil
 }
 
 // layout interprets the page and analyses its layout. With furniture set,

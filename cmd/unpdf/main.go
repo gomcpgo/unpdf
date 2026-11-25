@@ -5,6 +5,8 @@
 //
 //	unpdf info [-password PW] [-json] file.pdf
 //	unpdf text [-password PW] [-first N] [-last N] file.pdf
+//	unpdf markdown [-password PW] [-pages LIST] [-furniture] [-no-page-markers] file.pdf
+//	unpdf outline [-password PW] file.pdf
 package main
 
 import (
@@ -34,6 +36,10 @@ func main() {
 		err = info(ctx, os.Args[2:])
 	case "text":
 		err = text(ctx, os.Args[2:])
+	case "markdown":
+		err = markdown(ctx, os.Args[2:])
+	case "outline":
+		err = outline(ctx, os.Args[2:])
 	default:
 		usage()
 	}
@@ -52,6 +58,8 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: unpdf info [-password PW] [-json] file.pdf")
 	fmt.Fprintln(os.Stderr, "       unpdf text [-password PW] [-first N] [-last N] file.pdf")
+	fmt.Fprintln(os.Stderr, "       unpdf markdown [-password PW] [-pages LIST] [-furniture] [-no-page-markers] file.pdf")
+	fmt.Fprintln(os.Stderr, "       unpdf outline [-password PW] file.pdf")
 	os.Exit(64)
 }
 
@@ -181,5 +189,65 @@ func text(ctx context.Context, args []string) error {
 	for _, w := range doc.Warnings() {
 		fmt.Fprintf(os.Stderr, "warning [%s]: %s\n", w.Code, w.Message)
 	}
+	return nil
+}
+
+// markdown prints the document as Markdown.
+func markdown(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("markdown", flag.ExitOnError)
+	password := fs.String("password", "", "password for an encrypted file")
+	pages := fs.String("pages", "", "pages to convert, such as 1-5,8,12-")
+	furniture := fs.Bool("furniture", false, "keep running heads and page numbers")
+	noMarkers := fs.Bool("no-page-markers", false, "leave out the comment before each page")
+	fs.Parse(args)
+	if fs.NArg() != 1 {
+		usage()
+	}
+	doc, err := unpdf.OpenFile(ctx, fs.Arg(0), unpdf.Options{Password: *password})
+	if err != nil {
+		return err
+	}
+	defer doc.Close()
+	out := bufio.NewWriter(os.Stdout)
+	err = doc.WriteMarkdown(ctx, out, unpdf.MarkdownOptions{Pages: *pages, Furniture: *furniture, OmitPageMarkers: *noMarkers})
+	out.Flush()
+	if err != nil {
+		return err
+	}
+	for _, w := range doc.Warnings() {
+		fmt.Fprintf(os.Stderr, "warning [%s]: %s\n", w.Code, w.Message)
+	}
+	return nil
+}
+
+// outline prints the document's bookmarks, indented by depth.
+func outline(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("outline", flag.ExitOnError)
+	password := fs.String("password", "", "password for an encrypted file")
+	fs.Parse(args)
+	if fs.NArg() != 1 {
+		usage()
+	}
+	doc, err := unpdf.OpenFile(ctx, fs.Arg(0), unpdf.Options{Password: *password})
+	if err != nil {
+		return err
+	}
+	defer doc.Close()
+	items, err := doc.Outline(ctx)
+	if err != nil {
+		return err
+	}
+	var show func(items []unpdf.OutlineItem, depth int)
+	show = func(items []unpdf.OutlineItem, depth int) {
+		for _, it := range items {
+			page := ""
+			if it.Page > 0 {
+				page = fmt.Sprintf("  (page %d)", it.Page)
+			}
+			fmt.Printf("%*s%s%s\n", 2*depth, "", it.Title, page)
+			show(it.Children, depth+1)
+		}
+	}
+	show(items, 0)
 	return nil
 }

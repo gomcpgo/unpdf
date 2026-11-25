@@ -2,7 +2,7 @@
 
 A pure-Go library for getting the content out of PDF files, built for feeding documents to language models and search indexes.
 
-**Status: early.** It opens, repairs and decrypts PDFs, reads metadata, and extracts the text of each page in reading order, as plain text or as blocks, lines and words with their positions. Markdown, document structure, tables and images are next.
+**Status: early.** It opens, repairs and decrypts PDFs, reads metadata, and extracts text in reading order: as Markdown with headings, lists and links, as plain text, or as blocks, lines and words with their positions. It also returns the outline, links, comments and form fields. Tables, tagged-PDF structure and images are next.
 
 - No cgo, no external programs, no dependencies outside the Go standard library.
 - Safe on untrusted input: bounded memory, configurable limits, no panics on malformed files. Every parser has a fuzz target.
@@ -15,6 +15,22 @@ go get github.com/gomcpgo/unpdf
 ```
 
 ## Use
+
+Markdown for a whole document, which is usually what a language model wants:
+
+```go
+doc, err := unpdf.OpenFile(ctx, "report.pdf", unpdf.Options{})
+if err != nil {
+    return err
+}
+defer doc.Close()
+
+md, err := doc.Markdown(ctx, unpdf.MarkdownOptions{Pages: "1-20"})
+```
+
+Running heads and page numbers are left out, paragraphs are unwrapped, and a comment such as `<!-- page 3 -->` precedes each page so that a passage can be traced to its page. `WriteMarkdown` streams to an `io.Writer`, and `MaxBytes` caps the output.
+
+Page by page, as plain text:
 
 ```go
 doc, err := unpdf.OpenFile(ctx, "report.pdf", unpdf.Options{})
@@ -65,6 +81,17 @@ if scanned, _ := page.Scanned(ctx); scanned {
 }
 ```
 
+Each block has a `Kind` (heading, list item or paragraph) and a `Level`.
+
+The rest of what a document carries:
+
+```go
+outline, _ := doc.Outline(ctx)        // bookmarks, each with its page number
+fields, _ := doc.FormFields(ctx)      // form field names and values
+links, _ := page.Links(ctx)           // targets, with the text each link covers
+comments, _ := page.Annotations(ctx)  // sticky notes and other comments
+```
+
 Boxes are in points from the top-left corner of the page as displayed.
 
 There is also a small command-line tool:
@@ -72,6 +99,8 @@ There is also a small command-line tool:
 ```sh
 go run github.com/gomcpgo/unpdf/cmd/unpdf info report.pdf
 go run github.com/gomcpgo/unpdf/cmd/unpdf text report.pdf
+go run github.com/gomcpgo/unpdf/cmd/unpdf markdown -pages 1-10 report.pdf
+go run github.com/gomcpgo/unpdf/cmd/unpdf outline report.pdf
 ```
 
 ## What works today
@@ -96,11 +125,17 @@ go run github.com/gomcpgo/unpdf/cmd/unpdf text report.pdf
   - Running heads, running feet and page numbers marked, by comparing each page with its neighbours.
   - Text that is clipped away, outside the crop box, or drawn twice on top of itself is left out. Invisible text is left out too, unless it is the OCR layer of a scanned page.
   - Scanned pages flagged.
+- Structure:
+  - Headings, from font size and weight compared with the body text, and from the document outline where there is one. Levels follow the sizes the document uses.
+  - Bulleted and numbered list items, with nesting.
+  - Markdown built from these, with web links.
+  - The outline with page numbers, link targets with their anchor text, comment annotations, and form fields with their values.
 
 ## What does not work yet
 
-- Tables are read row by row but not recognised as tables: there are no cells, and no Markdown.
-- Headings, lists and other structure are not identified. Tagged PDFs are not read through their structure tree.
+- Tables are read row by row but not recognised as tables: there are no cells, and in Markdown each row is a line of text.
+- Structure is inferred from layout only. Tagged PDFs are not yet read through their structure tree, so a list whose bullets are drawn as graphics, as browsers draw them, comes out as plain lines.
+- A heading at body size and weight is found only if the outline names it. Text set large for other reasons, such as the names on a title page, can be taken for a heading.
 - A two-column layout whose columns hold only a word or two per line is read across, like a table.
 - In right-to-left text, a number next to a Latin phrase keeps its position on the page, which is ambiguous; vowel points may be attached to the wrong side of a letter.
 - Fonts whose only route to Unicode is a CFF font program's charset give U+FFFD, with a warning that names the font and counts the glyphs.

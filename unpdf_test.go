@@ -485,7 +485,11 @@ func FuzzOpen(f *testing.F) {
 		b.Set(2, fmt.Sprintf("<< /Type /Page /Parent 1 0 R /Contents 3 0 R /Resources << /Font << /F1 %d 0 R >> >> >>", font))
 		b.SetStream(3, "<< >>", []byte("BT /F1 12 Tf 72 700 Td [(Hello) -300 (world)] TJ ET"))
 		meta := b.AddStream("<< /Type /Metadata /Subtype /XML >>", []byte(`<x:xmpmeta xmlns:x="adobe:ns:meta/"/>`))
-		b.Set(b.Root, fmt.Sprintf("<< /Type /Catalog /Pages 1 0 R /Metadata %d 0 R >>", meta))
+		entry := b.Add("<< /Title (Start) /Dest [2 0 R /Fit] >>")
+		field := b.Add("<< /T (name) /FT /Tx /V (value) >>")
+		link := b.Add("<< /Type /Annot /Subtype /Link /Rect [70 690 200 715] /A << /S /URI /URI (https://example.com) >> >>")
+		b.Set(4, fmt.Sprintf("<< /Type /Page /Parent 1 0 R /Contents 5 0 R /Annots [%d 0 R] >>", link))
+		b.Set(b.Root, fmt.Sprintf("<< /Type /Catalog /Pages 1 0 R /Metadata %d 0 R /Outlines << /First %d 0 R >> /AcroForm << /Fields [%d 0 R] >> >>", meta, entry, field))
 		f.Add(b.Bytes())
 		b.Encrypt = &pdftest.Encryption{R: 4}
 		f.Add(b.Bytes())
@@ -531,12 +535,28 @@ func FuzzOpen(f *testing.F) {
 			if _, err := p.Scanned(ctx); err != nil {
 				t.Fatalf("Scanned failed without cancellation: %v", err)
 			}
+			if _, err := p.Links(ctx); err != nil {
+				t.Fatalf("Links failed without cancellation: %v", err)
+			}
+			if _, err := p.Annotations(ctx); err != nil {
+				t.Fatalf("Annotations failed without cancellation: %v", err)
+			}
 		}
 		if n > 64 {
 			t.Fatalf("walked %d pages, over MaxPages", n)
 		}
 		for _, k := range []int{1, n, info.Pages} {
 			doc.Page(ctx, k)
+		}
+		md, err := doc.Markdown(ctx, MarkdownOptions{MaxBytes: 1 << 16})
+		if err != nil || !utf8.ValidString(md) {
+			t.Fatalf("Markdown: valid %v, err %v", utf8.ValidString(md), err)
+		}
+		if _, err := doc.Outline(ctx); err != nil {
+			t.Fatalf("Outline failed without cancellation: %v", err)
+		}
+		if _, err := doc.FormFields(ctx); err != nil {
+			t.Fatalf("FormFields failed without cancellation: %v", err)
 		}
 		doc.Warnings()
 	})

@@ -138,8 +138,13 @@ func (fnt *Font) setName(name string) {
 	for _, s := range []string{"bold", "black", "heavy", "semibold", "demi"} {
 		fnt.Bold = fnt.Bold || strings.Contains(lower, s)
 	}
-	for _, s := range []string{"italic", "oblique", "-it", "slanted"} {
+	for _, s := range []string{"italic", "oblique", "-it", "slanted", "ital"} {
 		fnt.Italic = fnt.Italic || strings.Contains(lower, s)
+	}
+	// The URW fonts that stand in for Times, Helvetica and Courier call
+	// their bold weight "Medi".
+	if strings.HasSuffix(lower, "-medi") || strings.HasSuffix(lower, "-mediital") {
+		fnt.Bold = true
 	}
 	// Computer Modern names: cmbx is bold, cmti and cmsl are italic.
 	if strings.HasPrefix(lower, "cmbx") || strings.HasPrefix(lower, "sfbx") {

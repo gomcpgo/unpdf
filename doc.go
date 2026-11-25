@@ -37,11 +37,18 @@
 //
 // # Text
 //
-// Page.Text returns a page's text in reading order. Page.Blocks returns the
-// same text as blocks of lines of words, each with its position, and with
+// Document.Markdown converts a document, or some of its pages, to Markdown
+// with headings, lists and links: the form that suits a language model or a
+// search index best. Page.Text returns a page's plain text in reading order.
+// Page.Blocks returns the same text as blocks of lines of words, each with
+// its position and its kind (heading, list item or paragraph), and with
 // running heads and page numbers marked so that they can be left out.
 // Page.Scanned says whether the page is an image of a page, to be sent to
 // OCR.
+//
+// Document.Outline, Document.FormFields, Page.Links and Page.Annotations
+// return the bookmarks, the form fields with their values, the links and
+// the comments.
 //
 // Glyphs that a font gives no Unicode mapping for appear as U+FFFD; the
 // document's warnings then say which font and how many glyphs, so a caller
