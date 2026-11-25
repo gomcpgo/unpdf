@@ -162,7 +162,7 @@ const (
 func Open(ctx context.Context, src io.ReaderAt, size int64, password string, lim Limits) (*File, error) {
 	lim = lim.WithDefaults()
 	f := &File{
-		src: src, size: size, lim: lim,
+		src: &window{src: src}, size: size, lim: lim,
 		plim:     pdfobj.Limits{MaxDepth: lim.MaxDepth, MaxString: lim.MaxStringBytes, MaxItems: lim.MaxItems},
 		Trailer:  pdfobj.Dict{},
 		cache:    map[int]pdfobj.Object{},

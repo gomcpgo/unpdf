@@ -43,6 +43,9 @@ type styleModel struct {
 	headings []float64 // sizes above the body size, largest first
 	boldBody bool      // most body text is bold, so bold marks nothing
 	text     []float64 // other sizes that running text is set in
+	// tagsHeadings reports that the document's structure tree marks
+	// headings, so that its word on what is a heading can be taken.
+	tagsHeadings bool
 }
 
 // styleSample is how many pages are read to learn a document's styles.
@@ -71,6 +74,7 @@ func (d *Document) style(ctx context.Context) (*styleModel, error) {
 	chars := map[float64]int{}
 	bold := map[float64]int{}
 	long := map[float64]int{} // characters in blocks too long to be headings
+	tagged := false
 	for _, num := range sample {
 		page, err := d.Page(ctx, num)
 		if err != nil {
@@ -82,6 +86,11 @@ func (d *Document) style(ctx context.Context) (*styleModel, error) {
 		blocks, err := page.layout(ctx, false)
 		if err != nil {
 			return nil, err
+		}
+		if page.tags != nil {
+			for _, g := range page.tags.groups {
+				tagged = tagged || g.kind == Heading
+			}
 		}
 		for _, b := range blocks {
 			if b.Furniture || b.Angle != 0 {
@@ -101,7 +110,7 @@ func (d *Document) style(ctx context.Context) (*styleModel, error) {
 			}
 		}
 	}
-	m := &styleModel{}
+	m := &styleModel{tagsHeadings: tagged}
 	most := 0
 	for size, c := range chars {
 		if c > most || (c == most && size < m.body) {
@@ -293,7 +302,7 @@ func markerShape(marker string) string {
 func classify(blocks []Block, m *styleModel, titles []outlineTitle) []Block {
 	out := make([]Block, 0, len(blocks))
 	for _, b := range blocks {
-		if b.Furniture || b.Angle != 0 {
+		if b.Furniture || b.Angle != 0 || b.fixed {
 			out = append(out, b)
 			continue
 		}
@@ -307,7 +316,9 @@ func classify(blocks []Block, m *styleModel, titles []outlineTitle) []Block {
 		}
 		// A numbered heading, "2. Results", starts like a list item. Size
 		// and weight decide.
-		if level := m.headingLevel(&b); level > 0 {
+		// Where the document tags its headings, a block it tags as
+		// something else is not one, however it is set.
+		if level := m.headingLevel(&b); level > 0 && !(b.tagged && m.tagsHeadings) {
 			b.Kind, b.Level = Heading, level
 			out = append(out, b)
 			continue
@@ -318,7 +329,7 @@ func classify(blocks []Block, m *styleModel, titles []outlineTitle) []Block {
 	// Markers that could also be ordinary words, "A." or "I.", count only
 	// beside an item numbered in the same style.
 	for i := range out {
-		if out[i].Kind != ListItem || out[i].Level >= 0 {
+		if out[i].Kind != ListItem || out[i].Level >= 0 || out[i].fixed {
 			continue
 		}
 		shape := markerShape(out[i].Marker)
@@ -336,6 +347,9 @@ func classify(blocks []Block, m *styleModel, titles []outlineTitle) []Block {
 	var indents []float64
 	for i := range out {
 		b := &out[i]
+		if b.fixed && b.Kind == ListItem {
+			continue // the document gives its depth
+		}
 		if b.Kind != ListItem {
 			if !b.Furniture {
 				indents = indents[:0]

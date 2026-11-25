@@ -494,6 +494,15 @@ func FuzzOpen(f *testing.F) {
 		b.Encrypt = &pdftest.Encryption{R: 4}
 		f.Add(b.Bytes())
 	}
+	// A tagged page, and a page with a ruled table.
+	f.Add(taggedBytes("<< /Marked true >>", "", nil))
+	ruled := pdftest.New()
+	ruled.Pages(pdftest.PageSpec{
+		Resources: fmt.Sprintf("<< /Font << /F1 %d 0 R >> >>", ruled.Add(helvetica)),
+		Content: "72 640 300 -60 re S 72 620 m 372 620 l S 72 600 m 372 600 l S 172 580 m 172 640 l S 272 580 m 272 640 l S " +
+			cells(626, 76, "Team", 176, "Start", 276, "End") + cells(606, 76, "Support", 176, "88", 276, "97") + cells(586, 76, "Sales", 176, "204", 276, "224"),
+	})
+	f.Add(ruled.Bytes())
 	opts := Options{Limits: Limits{
 		MaxObjects: 4096, MaxStreamBytes: 1 << 20, MaxDepth: 32, MaxStringBytes: 1 << 16, MaxItems: 1 << 12, MaxPages: 64,
 	}}
@@ -537,6 +546,15 @@ func FuzzOpen(f *testing.F) {
 			}
 			if _, err := p.Links(ctx); err != nil {
 				t.Fatalf("Links failed without cancellation: %v", err)
+			}
+			tables, err := p.Tables(ctx)
+			if err != nil {
+				t.Fatalf("Tables failed without cancellation: %v", err)
+			}
+			for _, tb := range tables {
+				if tb.Rows < 1 || tb.Cols < 1 || tb.Confidence < 0 || tb.Confidence > 1 || !utf8.ValidString(tb.Markdown()) {
+					t.Fatalf("table of %d x %d, confidence %v", tb.Rows, tb.Cols, tb.Confidence)
+				}
 			}
 			if _, err := p.Annotations(ctx); err != nil {
 				t.Fatalf("Annotations failed without cancellation: %v", err)

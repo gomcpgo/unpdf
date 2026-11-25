@@ -65,16 +65,21 @@ type Block struct {
 	// still returned, so that the caller decides whether to keep it.
 	Furniture bool
 	// Kind says whether the block is a heading, a list item or a paragraph.
-	// It is worked out from the layout: a heading is a short block set
-	// larger or bolder than the body text, a list item starts with a bullet
-	// or a number.
+	// A tagged document says so itself. Otherwise it is worked out from the
+	// layout: a heading is a short block set larger or bolder than the body
+	// text, a list item starts with a bullet or a number.
 	Kind BlockKind
 	// Level is the rank of a heading, 1 to 6 with 1 the largest, or the
 	// depth of a list item, 0 for the outermost.
 	Level int
 	// Marker is the bullet or number of a list item, as printed. It is also
-	// the first word of the item's first line.
+	// the first word of the item's first line. It is empty for an item
+	// whose bullet is drawn and not written.
 	Marker string
+
+	// tagged reports that the block is one the document's structure tree
+	// defines, and fixed that the tree also says what kind it is.
+	tagged, fixed bool
 }
 
 // Text returns the text of the block, one line of the page per line of
@@ -117,6 +122,20 @@ func (p *Page) Blocks(ctx context.Context) ([]Block, error) {
 	out := make([]Block, len(laid))
 	for i, b := range laid {
 		out[i] = Block{Box: Box(b.Box), Angle: b.Angle, Furniture: b.Furniture, Lines: make([]Line, len(b.Lines))}
+		if p.tags != nil && b.Group > 0 && b.Group <= len(p.tags.groups) {
+			g := &p.tags.groups[b.Group-1]
+			out[i].tagged = true
+			kind := g.kind
+			if kind == Heading && !headingSized(b) {
+				// Tagged as a heading, but a paragraph by its length: some
+				// documents tag text as a heading to make it look like one.
+				kind = Paragraph
+			}
+			if kind != Paragraph || g.cell != 0 {
+				// A table cell is fixed too: its bold header is no heading.
+				out[i].Kind, out[i].Level, out[i].fixed = kind, g.level, true
+			}
+		}
 		for j, l := range b.Lines {
 			line := Line{Box: Box(l.Box), RTL: l.RTL, Words: make([]Word, len(l.Words))}
 			for k, w := range l.Words {
@@ -129,8 +148,54 @@ func (p *Page) Blocks(ctx context.Context) ([]Block, error) {
 	if err != nil {
 		return nil, err
 	}
-	p.public, p.classified = classify(out, model, titles), true
+	for i := range out {
+		// The marker of a list item the document tags: its first word, if
+		// that is a bullet or a number.
+		if b := &out[i]; b.fixed && b.Kind == ListItem && len(b.Lines) > 0 && len(b.Lines[0].Words) > 0 {
+			if _, _, ok := listMarker(b.Lines[0].Words[0].Text); ok {
+				b.Marker = b.Lines[0].Words[0].Text
+			}
+		}
+	}
+	p.public, p.classified = joinHeadings(classify(out, model, titles)), true
 	return p.public, nil
+}
+
+// headingSized reports whether a block is short enough to be a heading.
+func headingSized(b layout.Block) bool {
+	chars := 0
+	for _, l := range b.Lines {
+		for _, w := range l.Words {
+			chars += len(w.Text) + 1
+		}
+	}
+	return len(b.Lines) <= maxHeadingLines+1 && chars <= maxHeadingChars+100
+}
+
+// joinHeadings joins the lines of a heading that the document tags as
+// separate paragraphs, one per line, as page-layout programs do. They are
+// two headings found by their looks, of the same level and size, one right
+// under the other.
+func joinHeadings(blocks []Block) []Block {
+	out := blocks[:0]
+	for _, b := range blocks {
+		if n := len(out); n > 0 && b.Kind == Heading && b.tagged && !b.fixed && len(b.Lines) > 0 && len(b.Lines[0].Words) > 0 {
+			prev := &out[n-1]
+			if prev.Kind == Heading && prev.tagged && !prev.fixed && prev.Level == b.Level && prev.Angle == b.Angle &&
+				len(prev.Lines)+len(b.Lines) <= maxHeadingLines && len(prev.Lines[0].Words) > 0 {
+				size := b.Lines[0].Words[0].Size
+				gap := b.Box.Y0 - prev.Box.Y1
+				if math.Abs(prev.Lines[0].Words[0].Size-size) <= 0.5 && gap > -0.5*size && gap < 0.8*size {
+					prev.Lines = append(prev.Lines[:len(prev.Lines):len(prev.Lines)], b.Lines...)
+					prev.Box.X0, prev.Box.Y0 = math.Min(prev.Box.X0, b.Box.X0), math.Min(prev.Box.Y0, b.Box.Y0)
+					prev.Box.X1, prev.Box.Y1 = math.Max(prev.Box.X1, b.Box.X1), math.Max(prev.Box.Y1, b.Box.Y1)
+					continue
+				}
+			}
+		}
+		out = append(out, b)
+	}
+	return out
 }
 
 // layout interprets the page and analyses its layout. With furniture set,
@@ -142,7 +207,21 @@ func (p *Page) layout(ctx context.Context, furniture bool) ([]layout.Block, erro
 		if err != nil {
 			return nil, publicErr(err)
 		}
-		p.blocks, p.laidOut = layout.Analyze(p.visible(pc.glyphs)), true
+		tags := p.readTags(ctx)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if glyphs, ok := p.visible(pc.glyphs, tags); ok {
+			// The document says which text belongs together and in what
+			// order: only words and lines are left to work out.
+			blocks := layout.AnalyzeTagged(glyphs)
+			p.tags = tags
+			p.structTables = p.taggedTables(blocks)
+			p.blocks = p.foldRows(blocks)
+		} else {
+			p.blocks = layout.Analyze(glyphs)
+		}
+		p.laidOut = true
 		// The glyphs have served their purpose; a page has thousands.
 		pc.glyphs = nil
 	}

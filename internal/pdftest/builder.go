@@ -39,6 +39,9 @@ type object struct {
 
 // Builder accumulates objects and writes them out as a PDF.
 type Builder struct {
+	// CatalogExtra is more entries for the catalog that Pages makes, in
+	// PDF syntax without the enclosing brackets.
+	CatalogExtra string
 	// Version goes into the header. The default is "1.7".
 	Version string
 	// Layout selects the cross-reference format.
@@ -445,7 +448,7 @@ type PageSpec struct {
 
 // Pages adds one page per spec, a page tree and a catalog, and makes the
 // catalog the document root. Pages are US Letter unless Extra says
-// otherwise.
+// otherwise. The catalog also gets the entries in CatalogExtra.
 func (b *Builder) Pages(specs ...PageSpec) {
 	pages := b.Reserve()
 	kids := ""
@@ -459,5 +462,5 @@ func (b *Builder) Pages(specs ...PageSpec) {
 		kids += fmt.Sprintf("%d 0 R ", page)
 	}
 	b.Set(pages, fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d /MediaBox [0 0 612 792] >>", kids, len(specs)))
-	b.Root = b.Add(fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pages))
+	b.Root = b.Add(fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R %s >>", pages, b.CatalogExtra))
 }

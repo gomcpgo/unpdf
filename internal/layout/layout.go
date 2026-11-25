@@ -39,6 +39,9 @@ type Glyph struct {
 	Bold, Italic bool
 	// Artifact marks page furniture declared as such by the document.
 	Artifact bool
+	// Group is the block the document's own structure puts the glyph in,
+	// or 0 when it says nothing. AnalyzeTagged keeps every group together.
+	Group int
 }
 
 // Box is a rectangle in display space.
@@ -74,6 +77,9 @@ type Block struct {
 	Angle int
 	// Furniture marks a running head, a running foot or a page number.
 	Furniture bool
+	// Group is the group of the glyphs the block was built from, when
+	// AnalyzeTagged built it from one.
+	Group int
 }
 
 // Tuning. Distances are fractions of the font size.
@@ -172,12 +178,122 @@ func Analyze(glyphs []Glyph) []Block {
 	return blocks
 }
 
-// analyze lays out glyphs that all run in one direction.
-func analyze(glyphs []Glyph, angle int) []Block {
-	f := newFrame(angle)
-	words, spaces := f.buildWords(glyphs)
-	words = dropDuplicates(words)
-	a := &analysis{words: words, spaces: spaces}
+// AnalyzeTagged lays out a page whose glyphs the document has already
+// sorted into blocks: each group of glyphs becomes one block, and the blocks
+// come in ascending order of group number. Only words and lines are worked
+// out from geometry. Glyphs in no group are laid out the usual way and come
+// last; on a tagged page they are artifacts such as running heads.
+func AnalyzeTagged(glyphs []Glyph) []Block {
+	// The glyphs sorted by group, each group's in the order they came, in
+	// one slice: a page can have a group for every cell of a table.
+	// Sorted by counting: where each group starts, then every glyph to its
+	// group's next free place.
+	last := 0
+	for i := range glyphs {
+		last = max(last, glyphs[i].Group)
+	}
+	starts := make([]int, last+2)
+	kept := 0
+	for i := range glyphs {
+		if glyphs[i].Size > 0 {
+			starts[max(glyphs[i].Group, 0)+1]++
+			kept++
+		}
+	}
+	for g := 1; g < len(starts); g++ {
+		starts[g] += starts[g-1]
+	}
+	sorted := make([]Glyph, kept)
+	for i := range glyphs {
+		if glyphs[i].Size > 0 {
+			g := max(glyphs[i].Group, 0)
+			sorted[starts[g]] = glyphs[i]
+			starts[g]++
+		}
+	}
+	// starts[g] is now where group g ends; group 0 holds what is in none.
+	loose := starts[0]
+	rest := sorted[:loose:loose]
+	var blocks []Block
+	for from := loose; from < len(sorted); {
+		id := sorted[from].Group
+		to := from
+		for to < len(sorted) && sorted[to].Group == id {
+			to++
+		}
+		gs := sorted[from:to]
+		from = to
+		// The direction of most of the group's glyphs.
+		var seen [8]struct{ angle, n int }
+		used, angle, most := 0, 0, 0
+		for i := range gs {
+			a := direction(gs[i].UX, gs[i].UY)
+			k := 0
+			for k < used && seen[k].angle != a {
+				k++
+			}
+			if k == len(seen) {
+				continue // more directions in one block than matter
+			}
+			if k == used {
+				seen[k].angle = a
+				used++
+			}
+			if seen[k].n++; seen[k].n > most {
+				angle, most = a, seen[k].n
+			}
+		}
+		f := newFrame(angle)
+		words, spaces := f.buildWords(gs)
+		words = dropDuplicates(words)
+		a := &analysis{words: words, spaces: spaces}
+		a.rtl = rtlShare(words)
+		// A block may run on from the foot of one column to the head of
+		// the next. Its words come in reading order, so a jump back up the
+		// page starts a new stretch, and each stretch is put into lines on
+		// its own.
+		var lines []*line
+		start := 0
+		for i := 1; i <= len(words); i++ {
+			if i < len(words) && words[i].base >= words[i-1].base-2*math.Max(words[i].size, words[i-1].size) {
+				continue
+			}
+			stretch := make([]int, 0, i-start)
+			for k := start; k < i; k++ {
+				stretch = append(stretch, k)
+			}
+			lines = append(lines, a.buildLines(stretch)...)
+			start = i
+		}
+		for _, l := range lines {
+			l.finish(a.rtl)
+		}
+		if b, ok := f.oneBlock(lines); ok {
+			b.Group = id
+			blocks = append(blocks, b)
+		}
+	}
+	// What the structure leaves out is page furniture, by rights. Anything
+	// above all the structured text goes first, the rest last.
+	top := math.Inf(1)
+	for _, b := range blocks {
+		if b.Angle == 0 {
+			top = math.Min(top, b.Box.Y0)
+		}
+	}
+	var before, after []Block
+	for _, b := range Analyze(rest) {
+		if b.Box.Y1 <= top {
+			before = append(before, b)
+		} else {
+			after = append(after, b)
+		}
+	}
+	return append(append(before, blocks...), after...)
+}
+
+// rtlShare reports whether most of the words are right-to-left script.
+func rtlShare(words []*word) bool {
 	rtl, ltr := 0, 0
 	for _, w := range words {
 		switch {
@@ -187,7 +303,32 @@ func analyze(glyphs []Glyph, angle int) []Block {
 			ltr++
 		}
 	}
-	a.rtl = rtl > 0 && rtl >= ltr
+	return rtl > 0 && rtl >= ltr
+}
+
+// oneBlock makes a single block of all the lines.
+func (f frame) oneBlock(lines []*line) (Block, bool) {
+	parts := f.buildBlocks(lines)
+	if len(parts) == 0 {
+		return Block{}, false
+	}
+	b := parts[0]
+	b.Furniture = false
+	for _, p := range parts[1:] {
+		b.Lines = append(b.Lines, p.Lines...)
+		b.Box.X0, b.Box.Y0 = math.Min(b.Box.X0, p.Box.X0), math.Min(b.Box.Y0, p.Box.Y0)
+		b.Box.X1, b.Box.Y1 = math.Max(b.Box.X1, p.Box.X1), math.Max(b.Box.Y1, p.Box.Y1)
+	}
+	return b, true
+}
+
+// analyze lays out glyphs that all run in one direction.
+func analyze(glyphs []Glyph, angle int) []Block {
+	f := newFrame(angle)
+	words, spaces := f.buildWords(glyphs)
+	words = dropDuplicates(words)
+	a := &analysis{words: words, spaces: spaces}
+	a.rtl = rtlShare(words)
 	var blocks []Block
 	for _, leaf := range a.cut(all(len(words)), 0) {
 		lines := a.buildLines(leaf)
@@ -216,7 +357,7 @@ func Mark(blocks []Block, test func(text string, box Box) bool) []Block {
 			if end <= start {
 				return
 			}
-			part := Block{Lines: b.Lines[start:end:end], Angle: b.Angle, Furniture: furniture, Box: b.Lines[start].Box}
+			part := Block{Lines: b.Lines[start:end:end], Angle: b.Angle, Furniture: furniture, Group: b.Group, Box: b.Lines[start].Box}
 			for _, l := range part.Lines[1:] {
 				part.Box.X0, part.Box.Y0 = math.Min(part.Box.X0, l.Box.X0), math.Min(part.Box.Y0, l.Box.Y0)
 				part.Box.X1, part.Box.Y1 = math.Max(part.Box.X1, l.Box.X1), math.Max(part.Box.Y1, l.Box.Y1)
@@ -304,7 +445,7 @@ func (f frame) box(x0, y0, x1, y1 float64) Box {
 func (f frame) buildWords(glyphs []Glyph) ([]*word, []spaceMark) {
 	// Words and their parts are carved out of two large slices, not
 	// allocated one by one: a page has thousands of them.
-	slab := make([]word, 0, len(glyphs)/4+16)
+	slab := make([]word, 0, len(glyphs)/4+2)
 	arena := make([]part, 0, len(glyphs))
 	newWord := func(w word) *word {
 		if len(slab) == cap(slab) {
@@ -313,10 +454,31 @@ func (f frame) buildWords(glyphs []Glyph) ([]*word, []spaceMark) {
 		slab = append(slab, w)
 		return &slab[len(slab)-1]
 	}
-	words := make([]*word, 0, len(glyphs)/4+16)
+	words := make([]*word, 0, len(glyphs)/4+2)
 	var spaces []spaceMark
 	var cur *word
 	curStart := 0
+	// Fonts found to overstate their widths (see below), with the width
+	// their glyphs really take. A word's last glyph has no neighbour to
+	// show its width, so it is given this one.
+	type face struct {
+		font string
+		size float64
+	}
+	var narrow map[face]float64
+	finish := func(w *word) {
+		if w == nil || narrow == nil || len(w.parts) == 0 {
+			return
+		}
+		last := &w.parts[len(w.parts)-1]
+		if width, ok := narrow[face{w.font, w.size}]; ok && last.x1-last.x0 > 1.5*width && last.x1 == w.x1 {
+			last.x1 = last.x0 + width
+			w.x1 = w.x0
+			for _, p := range w.parts {
+				w.x1 = math.Max(w.x1, p.x1)
+			}
+		}
+	}
 	for i := range glyphs {
 		g := &glyphs[i]
 		x, y := f.in(g.X, g.Y)
@@ -332,7 +494,11 @@ func (f frame) buildWords(glyphs []Glyph) ([]*word, []spaceMark) {
 		if strings.TrimSpace(g.Text) == "" {
 			// A space ends the word. It leaves no word of its own, only a
 			// mark where it stood.
+			finish(cur)
 			cur = nil
+			if width, ok := narrow[face{g.Font, g.Size}]; ok {
+				adv = math.Min(adv, width)
+			}
 			spaces = append(spaces, spaceMark{x + adv/2, y})
 			continue
 		}
@@ -346,7 +512,28 @@ func (f frame) buildWords(glyphs []Glyph) ([]*word, []spaceMark) {
 		if cur != nil {
 			size := math.Max(cur.size, g.Size)
 			gap := x - cur.x1
-			if math.Abs(y-cur.base) > 0.5*size || gap > SpaceGap*size || gap < -0.5*size {
+			last := &arena[len(arena)-1]
+			switch {
+			case math.Abs(y-cur.base) > 0.5*size || gap > SpaceGap*size:
+				finish(cur)
+				cur = nil
+			case gap < -0.5*size && x >= last.x0+0.25*size && last.x1 == cur.x1:
+				// The glyph starts well inside the one before it, yet
+				// further along: that glyph is narrower than its font said.
+				// Fonts that give no widths do this, with every glyph set
+				// in place one by one. The word goes on.
+				last.x1, cur.x1 = x, x
+				if narrow == nil {
+					narrow = map[face]float64{}
+				}
+				key := face{cur.font, cur.size}
+				if width, ok := narrow[key]; ok {
+					narrow[key] = (3*width + x - last.x0) / 4
+				} else {
+					narrow[key] = x - last.x0
+				}
+			case gap < -0.5*size:
+				finish(cur)
 				cur = nil
 			}
 		}
@@ -372,6 +559,7 @@ func (f frame) buildWords(glyphs []Glyph) ([]*word, []spaceMark) {
 			cur.size, cur.font, cur.bold, cur.italic, cur.base = g.Size, g.Font, g.Bold, g.Italic, y
 		}
 	}
+	finish(cur)
 	return words, spaces
 }
 

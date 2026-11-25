@@ -431,17 +431,119 @@ func FuzzAnalyze(f *testing.F) {
 			glyphs = append(glyphs, g)
 			x += g.Advance
 		}
-		blocks := Analyze(glyphs)
-		blocks = Mark(blocks, func(text string, box Box) bool { return len(text)%2 == 0 })
-		Text(blocks)
-		for _, b := range blocks {
-			for _, l := range b.Lines {
-				for _, w := range l.Words {
-					if math.IsNaN(w.Box.X0+w.Box.Y0+w.Box.X1+w.Box.Y1) || w.Text == "" {
-						t.Fatalf("bad word %+v", w)
+		check := func(blocks []Block) {
+			blocks = Mark(blocks, func(text string, box Box) bool { return len(text)%2 == 0 })
+			Text(blocks)
+			for _, b := range blocks {
+				for _, l := range b.Lines {
+					for _, w := range l.Words {
+						if math.IsNaN(w.Box.X0+w.Box.Y0+w.Box.X1+w.Box.Y1) || w.Text == "" {
+							t.Fatalf("bad word %+v", w)
+						}
 					}
 				}
 			}
 		}
+		check(Analyze(glyphs))
+		// The same glyphs sorted into blocks by a structure tree, some in
+		// none, with advances that overstate now and then.
+		for i := range glyphs {
+			glyphs[i].Group = (i / (3 + int(mode)%11)) % 5
+			if mode&4 == 4 {
+				glyphs[i].Advance *= 2.5
+			}
+		}
+		check(AnalyzeTagged(glyphs))
 	})
+}
+
+// group marks glyphs as part of one block of the document's structure.
+func group(n int, glyphs []Glyph) []Glyph {
+	for i := range glyphs {
+		glyphs[i].Group = n
+	}
+	return glyphs
+}
+
+func TestOverstatedAdvances(t *testing.T) {
+	// A font that gives no widths: every glyph claims a full em, and the
+	// page sets each one in place itself, closer than that.
+	var g []Glyph
+	x := 100.0
+	for _, r := range "Alabama" {
+		g = append(g, Glyph{Text: string(r), X: x, Y: 100, UX: 1, Advance: 10, Size: 10})
+		x += 4.5
+	}
+	g = append(g, Glyph{Text: " ", X: x, Y: 100, UX: 1, Advance: 10, Size: 10})
+	x += 3
+	for _, r := range "40,698" {
+		g = append(g, Glyph{Text: string(r), X: x, Y: 100, UX: 1, Advance: 10, Size: 10})
+		x += 4.5
+	}
+	blocks := Analyze(g)
+	if got := texts(blocks); !equal(got, []string{"Alabama 40,698"}) {
+		t.Errorf("got %q", got)
+	}
+	// Text drawn a second time over itself still starts a new word, which
+	// is then dropped as a duplicate.
+	twice := append(run(100, 100, 10, "bold"), run(100.2, 100, 10, "bold")...)
+	if got := texts(Analyze(twice)); !equal(got, []string{"bold"}) {
+		t.Errorf("drawn twice: %q", got)
+	}
+}
+
+func TestAnalyzeTagged(t *testing.T) {
+	var g []Glyph
+	// The structure reads the right-hand box first, then a paragraph that
+	// starts at the foot of the left column and ends at the head of the
+	// right, then the heading at the top: nothing geometry would guess.
+	g = append(g, group(1, run(300, 400, 10, "sidebar first"))...)
+	g = append(g, group(2, paragraph(50, 600, 10, 12, "a paragraph that starts low", "in the first column and"))...)
+	g = append(g, group(2, paragraph(300, 100, 10, 12, "goes on at the top of", "the second column"))...)
+	g = append(g, group(3, run(50, 60, 20, "Heading"))...)
+	// Text in no group: a running head above everything, a footer below.
+	head := run(50, 20, 8, "Running head")
+	foot := run(50, 760, 8, "Page 7")
+	for i := range foot {
+		foot[i].Artifact = true
+	}
+	g = append(g, head...)
+	g = append(g, foot...)
+	// Two cells of a table row, each its own block, side by side.
+	g = append(g, group(4, run(50, 300, 10, "Cell one"))...)
+	g = append(g, group(5, run(300, 300, 10, "Cell two"))...)
+
+	blocks := AnalyzeTagged(g)
+	want := []string{
+		"Running head",
+		"sidebar first",
+		"a paragraph that starts low\nin the first column and\ngoes on at the top of\nthe second column",
+		"Heading",
+		"Cell one",
+		"Cell two",
+		"Page 7",
+	}
+	if got := texts(blocks); !equal(got, want) {
+		t.Fatalf("got %q", got)
+	}
+	for i, n := range []int{0, 1, 2, 3, 4, 5, 0} {
+		if blocks[i].Group != n {
+			t.Errorf("block %d (%q) has group %d, want %d", i, blocks[i].Text(), blocks[i].Group, n)
+		}
+	}
+	if !blocks[6].Furniture || blocks[1].Furniture {
+		t.Errorf("furniture: footer %v, sidebar %v", blocks[6].Furniture, blocks[1].Furniture)
+	}
+	// Mark keeps a block's group.
+	marked := Mark(blocks, func(text string, _ Box) bool { return text == "Running head" })
+	if !marked[0].Furniture || marked[2].Group != 2 {
+		t.Errorf("after Mark: furniture %v, group %d", marked[0].Furniture, marked[2].Group)
+	}
+	// Nothing tagged, and nothing at all.
+	if got := texts(AnalyzeTagged(run(50, 60, 10, "plain"))); !equal(got, []string{"plain"}) {
+		t.Errorf("untagged: %q", got)
+	}
+	if got := AnalyzeTagged(nil); len(got) != 0 {
+		t.Errorf("empty: %v", got)
+	}
 }

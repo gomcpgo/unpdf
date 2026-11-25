@@ -2,7 +2,7 @@
 
 A pure-Go library for getting the content out of PDF files, built for feeding documents to language models and search indexes.
 
-**Status: early.** It opens, repairs and decrypts PDFs, reads metadata, and extracts text in reading order: as Markdown with headings, lists and links, as plain text, or as blocks, lines and words with their positions. It also returns the outline, links, comments and form fields. Tables, tagged-PDF structure and images are next.
+**Status: early.** It opens, repairs and decrypts PDFs, reads metadata, and extracts text in reading order: as Markdown with headings, lists, tables and links, as plain text, or as blocks, lines and words with their positions. It finds tables and gives their cells, reads the structure tree of tagged PDFs, and returns the outline, links, comments and form fields. Images are next.
 
 - No cgo, no external programs, no dependencies outside the Go standard library.
 - Safe on untrusted input: bounded memory, configurable limits, no panics on malformed files. Every parser has a fuzz target.
@@ -83,6 +83,23 @@ if scanned, _ := page.Scanned(ctx); scanned {
 
 Each block has a `Kind` (heading, list item or paragraph) and a `Level`.
 
+Tables, with their cells:
+
+```go
+tables, err := page.Tables(ctx)
+for _, t := range tables {
+    if t.Confidence < 0.5 {
+        continue // not sure enough: the text is in Blocks all the same
+    }
+    for _, row := range t.Grid() {
+        // row is the text of each cell, left to right
+    }
+    fmt.Println(t.Markdown())
+}
+```
+
+A table carries the way it was found (`Method`) and how sure the detection is (`Confidence`). Markdown shows a table as a table from a confidence of 0.5, and as lines of text below that.
+
 The rest of what a document carries:
 
 ```go
@@ -101,6 +118,7 @@ go run github.com/gomcpgo/unpdf/cmd/unpdf info report.pdf
 go run github.com/gomcpgo/unpdf/cmd/unpdf text report.pdf
 go run github.com/gomcpgo/unpdf/cmd/unpdf markdown -pages 1-10 report.pdf
 go run github.com/gomcpgo/unpdf/cmd/unpdf outline report.pdf
+go run github.com/gomcpgo/unpdf/cmd/unpdf tables -min 0.5 report.pdf
 ```
 
 ## What works today
@@ -128,14 +146,23 @@ go run github.com/gomcpgo/unpdf/cmd/unpdf outline report.pdf
 - Structure:
   - Headings, from font size and weight compared with the body text, and from the document outline where there is one. Levels follow the sizes the document uses.
   - Bulleted and numbered list items, with nesting.
+  - Tagged PDFs, as Word, browsers, InDesign and accessible exports make them: the structure tree gives the reading order, the headings with their levels, the list items and the tables. A page whose tags leave out much of its text is laid out from its geometry instead.
   - Markdown built from these, with web links.
   - The outline with page numbers, link targets with their anchor text, comment annotations, and form fields with their values.
+- Tables:
+  - From the structure tree of a tagged PDF, with merged cells and header rows as tagged.
+  - From ruling lines that form a grid, with merged cells. Rows that no rule separates, as in most statistical tables, are told apart by their lines of text, and row labels that stand outside the grid are taken in.
+  - From text that lines up in columns over three or more rows, with no lines drawn. Cells of more than one line, currency signs set in a column of their own and labels that wrap are put back together.
+  - Each with a confidence. Forms, charts, tables of contents and numbered lists, which can look like tables, score low.
+  - In Markdown, a table that runs on over a page break is continued under the same header.
 
 ## What does not work yet
 
-- Tables are read row by row but not recognised as tables: there are no cells, and in Markdown each row is a line of text.
-- Structure is inferred from layout only. Tagged PDFs are not yet read through their structure tree, so a list whose bullets are drawn as graphics, as browsers draw them, comes out as plain lines.
-- A heading at body size and weight is found only if the outline names it. Text set large for other reasons, such as the names on a title page, can be taken for a heading.
+- Table detection without tags is a judgement, and it errs both ways. The labels of a diagram that happen to line up in rows and columns can be taken for a table. A table without rules whose cells hold wrapped text, with nothing to mark where a row ends, is left as text. Check `Confidence`, and expect surprises in documents full of figures.
+- Markdown tables have no merged cells: the text of a merged cell is in its first position and the rest are empty. A table's first row is always shown as the header row.
+- Without tags, a heading at body size and weight is found only if the outline names it, a list whose bullets are drawn as graphics comes out as plain lines, and text set large for other reasons, such as the names on a title page, can be taken for a heading.
+- A tagged document is taken at its word. Where it tags its headings, text it tags as a paragraph is not made a heading for being bold, so a heading the author did not tag is missed.
+- Tagged content inside form XObjects that number their own marked content, and alternative text for figures, are not read.
 - A two-column layout whose columns hold only a word or two per line is read across, like a table.
 - In right-to-left text, a number next to a Latin phrase keeps its position on the page, which is ambiguous; vowel points may be attached to the wrong side of a letter.
 - Fonts whose only route to Unicode is a CFF font program's charset give U+FFFD, with a warning that names the font and counts the glyphs.

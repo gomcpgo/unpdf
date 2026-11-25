@@ -316,3 +316,75 @@ func FuzzRun(f *testing.F) {
 		in.Run(ctx, content, resources, Identity)
 	})
 }
+
+func (fx *fixture) rules(content string) []Rule {
+	var rules []Rule
+	in := New(fx.f, font.NewCache(fx.f), Sink{Rule: func(r Rule) { rules = append(rules, r) }})
+	in.Run(ctx, []byte(content), fx.res, Identity)
+	return rules
+}
+
+func TestRules(t *testing.T) {
+	fx := newFixture(t, func(b *pdftest.Builder) string {
+		form := b.AddStream("<< /Type /XObject /Subtype /Form /BBox [0 0 100 100] /Matrix [1 0 0 1 0 500] >>", []byte("0 5 m 60 5 l S"))
+		return fmt.Sprintf("/Fm %d 0 R", form)
+	})
+	for _, tc := range []struct {
+		name, content string
+		want          []Rule
+	}{
+		{"a stroked horizontal line", "10 100 m 200 100 l S", []Rule{{10, 100, 200, 100}}},
+		{"a stroked vertical line, drawn downward", "50 300 m 50 20 l S", []Rule{{50, 20, 50, 300}}},
+		{"a slanted line is no rule", "10 10 m 200 100 l S", nil},
+		{"a line too short to rule anything", "10 10 m 12 10 l S", nil},
+		{"a path that is not painted", "10 100 m 200 100 l n", nil},
+		{"a curve is no rule", "10 100 m 20 120 40 120 200 100 c S", nil},
+		{"two lines in one path", "10 100 m 200 100 l 10 80 m 200 80 l S", []Rule{{10, 100, 200, 100}, {10, 80, 200, 80}}},
+		{"a stroked rectangle is four rules", "10 20 100 50 re S",
+			[]Rule{{10, 20, 110, 20}, {10, 70, 110, 70}, {10, 20, 10, 70}, {110, 20, 110, 70}}},
+		{"a thin filled rectangle is one rule", "10 20 100 0.5 re f", []Rule{{10, 20.25, 110, 20.25}}},
+		{"a thin filled rectangle, upright", "10 20 0.8 100 re f*", []Rule{{10.4, 20, 10.4, 120}}},
+		{"a filled box is no rule", "10 20 100 50 re f", nil},
+		{"a thin rectangle drawn with lines and filled", "10 20 m 110 20 l 110 21 l 10 21 l h f", []Rule{{10, 20.5, 110, 20.5}}},
+		{"closing a path adds its last side", "10 10 m 100 10 l 100 80 l s",
+			[]Rule{{10, 10, 100, 10}, {100, 10, 100, 80}}},
+		{"the transformation applies", "2 0 0 2 5 5 cm 10 100 m 200 100 l S", []Rule{{25, 205, 405, 205}}},
+		{"a rotation turns a horizontal line upright", "0 1 -1 0 0 0 cm 10 100 m 200 100 l S", []Rule{{-100, 10, -100, 200}}},
+		{"a line inside a form", "/Fm Do", []Rule{{0, 505, 60, 505}}},
+		{"a path left open by a form does not leak", "10 100 m /Fm Do 200 100 l S", []Rule{{0, 505, 60, 505}}},
+	} {
+		got := fx.rules(tc.content)
+		ok := len(got) == len(tc.want)
+		for i := 0; ok && i < len(got); i++ {
+			ok = near(got[i].X0, tc.want[i].X0) && near(got[i].Y0, tc.want[i].Y0) && near(got[i].X1, tc.want[i].X1) && near(got[i].Y1, tc.want[i].Y1)
+		}
+		if !ok {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+
+	// A path with more segments than are kept does no harm.
+	var b strings.Builder
+	b.WriteString("0 0 m ")
+	for i := 0; i < 3*maxPathSegments; i++ {
+		fmt.Fprintf(&b, "%d %d l ", i%500, 10*(i%2))
+	}
+	b.WriteString("S")
+	if got := fx.rules(b.String()); len(got) > maxPathSegments {
+		t.Errorf("%d rules from one path, more than the %d segments kept", len(got), maxPathSegments)
+	}
+}
+
+func TestMarkedContentInForms(t *testing.T) {
+	fx := newFixture(t, func(b *pdftest.Builder) string {
+		form := b.AddStream("<< /Type /XObject /Subtype /Form /BBox [0 0 100 100] >>",
+			[]byte("/Span << /MCID 3 >> BDC BT /F1 10 Tf (in) Tj ET EMC"))
+		return fmt.Sprintf("/Fm %d 0 R", form)
+	})
+	// A form numbers its marked content apart from the page: its numbers
+	// are not the page's. The page's own number carries into the form.
+	glyphs, _ := fx.run("/Fm Do /P << /MCID 7 >> BDC /Fm Do EMC")
+	if len(glyphs) != 4 || glyphs[0].MCID != -1 || glyphs[2].MCID != 7 {
+		t.Errorf("identifiers: %d glyphs, %d and %d", len(glyphs), glyphs[0].MCID, glyphs[2].MCID)
+	}
+}

@@ -101,7 +101,8 @@ func (d *Document) destinationPage(ctx context.Context, dest pdfobj.Object) int 
 			dest = f.Dict(ctx, d.catalog["Dests"])[v]
 		case pdfobj.String:
 			names := f.Dict(ctx, d.catalog["Names"])
-			dest = d.nameTree(ctx, f.Dict(ctx, names["Dests"]), v, 0)
+			budget := treeBudget
+			dest = d.nameTree(ctx, f.Dict(ctx, names["Dests"]), v, 0, &budget)
 		default:
 			return 0
 		}
@@ -112,11 +113,12 @@ func (d *Document) destinationPage(ctx context.Context, dest pdfobj.Object) int 
 // nameTree looks a key up in a name tree: a tree whose leaves hold sorted
 // key and value pairs and whose inner nodes give the range of keys below
 // them.
-func (d *Document) nameTree(ctx context.Context, node pdfobj.Dict, key []byte, depth int) pdfobj.Object {
+func (d *Document) nameTree(ctx context.Context, node pdfobj.Dict, key []byte, depth int, budget *int) pdfobj.Object {
 	f := d.f
-	if node == nil || depth > maxNameTreeDepth || ctx.Err() != nil {
+	if node == nil || depth > maxNameTreeDepth || *budget <= 0 || ctx.Err() != nil {
 		return nil
 	}
+	*budget--
 	if names := f.Array(ctx, node["Names"]); names != nil {
 		for i := 0; i+1 < len(names); i += 2 {
 			if k, ok := f.String(ctx, names[i]); ok && bytes.Equal(k, key) {
@@ -133,7 +135,7 @@ func (d *Document) nameTree(ctx context.Context, node pdfobj.Dict, key []byte, d
 				continue
 			}
 		}
-		if v := d.nameTree(ctx, kd, key, depth+1); v != nil {
+		if v := d.nameTree(ctx, kd, key, depth+1, budget); v != nil {
 			return v
 		}
 	}

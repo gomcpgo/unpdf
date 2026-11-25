@@ -38,13 +38,22 @@
 // # Text
 //
 // Document.Markdown converts a document, or some of its pages, to Markdown
-// with headings, lists and links: the form that suits a language model or a
-// search index best. Page.Text returns a page's plain text in reading order.
-// Page.Blocks returns the same text as blocks of lines of words, each with
-// its position and its kind (heading, list item or paragraph), and with
-// running heads and page numbers marked so that they can be left out.
-// Page.Scanned says whether the page is an image of a page, to be sent to
-// OCR.
+// with headings, lists, tables and links: the form that suits a language
+// model or a search index best. Page.Text returns a page's plain text in
+// reading order. Page.Blocks returns the same text as blocks of lines of
+// words, each with its position and its kind (heading, list item or
+// paragraph), and with running heads and page numbers marked so that they
+// can be left out. Page.Scanned says whether the page is an image of a
+// page, to be sent to OCR.
+//
+// Page.Tables returns the tables on a page with their cells. A table comes
+// from the document's own tags, from ruling lines that form a grid, or from
+// text that lines up in columns; each says which, and how confident the
+// detection is.
+//
+// A tagged PDF describes its own structure: its reading order, headings,
+// lists and tables. Where a page is tagged, that description is used in
+// place of what the layout suggests.
 //
 // Document.Outline, Document.FormFields, Page.Links and Page.Annotations
 // return the bookmarks, the form fields with their values, the links and

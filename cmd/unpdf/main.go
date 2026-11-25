@@ -40,6 +40,8 @@ func main() {
 		err = markdown(ctx, os.Args[2:])
 	case "outline":
 		err = outline(ctx, os.Args[2:])
+	case "tables":
+		err = tables(ctx, os.Args[2:])
 	default:
 		usage()
 	}
@@ -60,6 +62,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "       unpdf text [-password PW] [-first N] [-last N] file.pdf")
 	fmt.Fprintln(os.Stderr, "       unpdf markdown [-password PW] [-pages LIST] [-furniture] [-no-page-markers] file.pdf")
 	fmt.Fprintln(os.Stderr, "       unpdf outline [-password PW] file.pdf")
+	fmt.Fprintln(os.Stderr, "       unpdf tables [-password PW] [-first N] [-last N] [-min CONFIDENCE] file.pdf")
 	os.Exit(64)
 }
 
@@ -249,5 +252,47 @@ func outline(ctx context.Context, args []string) error {
 		}
 	}
 	show(items, 0)
+	return nil
+}
+
+// tables prints every table of the document as Markdown, each under a line
+// that says where it is and how it was found.
+func tables(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("tables", flag.ExitOnError)
+	password := fs.String("password", "", "password for an encrypted file")
+	first := fs.Int("first", 1, "first page")
+	last := fs.Int("last", 0, "last page (0 for the last page of the document)")
+	least := fs.Float64("min", 0, "leave out tables below this confidence, 0 to 1")
+	fs.Parse(args)
+	if fs.NArg() != 1 {
+		usage()
+	}
+	doc, err := unpdf.OpenFile(ctx, fs.Arg(0), unpdf.Options{Password: *password})
+	if err != nil {
+		return err
+	}
+	defer doc.Close()
+	for page, err := range doc.Pages(ctx) {
+		if err != nil {
+			return err
+		}
+		if page.Number < *first {
+			continue
+		}
+		if *last > 0 && page.Number > *last {
+			break
+		}
+		found, err := page.Tables(ctx)
+		if err != nil {
+			return err
+		}
+		for i, t := range found {
+			if t.Confidence < *least {
+				continue
+			}
+			fmt.Printf("page %d, table %d: %d rows, %d columns, found from %s, confidence %.2f\n\n%s\n\n",
+				page.Number, i+1, t.Rows, t.Cols, t.Method, t.Confidence, t.Markdown())
+		}
+	}
 	return nil
 }

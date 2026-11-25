@@ -123,6 +123,8 @@ type Document struct {
 	bandCache     map[int]map[string]bool
 	recent        []*Page
 	styles        *styleModel
+	tagTree       *structTree // the structure tree of a tagged document
+	tagsChecked   bool
 	pageNumbers   map[int]int // page object number to page number
 	titles        map[int][]outlineTitle
 }

@@ -87,6 +87,12 @@ type Image struct {
 	Inline         bool
 }
 
+// Rule is a horizontal or vertical line in page space. For a horizontal
+// rule Y0 equals Y1; for a vertical one X0 equals X1.
+type Rule struct {
+	X0, Y0, X1, Y1 float64
+}
+
 // Sink receives what the interpreter finds. Either function may be nil.
 type Sink struct {
 	// Glyph is called for every glyph shown. Returning false stops the
@@ -94,6 +100,10 @@ type Sink struct {
 	// keep it.
 	Glyph func(*Glyph) bool
 	Image func(Image)
+	// Rule is called for every straight line that runs across or down the
+	// page: a stroked horizontal or vertical segment, or a filled rectangle
+	// so thin that it is a line. These are the rulings of tables.
+	Rule func(Rule)
 }
 
 const (
@@ -155,7 +165,12 @@ type Interp struct {
 	active  map[int]bool // form XObjects being executed, to cut recursion
 	glyph   Glyph        // the glyph handed to the sink, reused
 	path    box          // bounding box of the path under construction
-	clipNow bool         // W or W* seen: the path becomes the clip when it ends
+	segs    [][4]float64 // straight segments of that path, in page space
+	rects   [][4]float64 // rectangles of that path, as bounding boxes
+	start   [2]float64   // first point of the current subpath
+	cur     [2]float64   // current point
+	hasCur  bool
+	clipNow bool // W or W* seen: the path becomes the clip when it ends
 	ops     int
 	stopped bool
 }
@@ -177,6 +192,7 @@ func (in *Interp) Run(ctx context.Context, data []byte, res pdfobj.Dict, ctm Mat
 	in.marks = in.marks[:0]
 	in.depth, in.ops, in.stopped = 0, 0, false
 	in.path, in.clipNow = box{}, false
+	in.segs, in.rects, in.hasCur = in.segs[:0], in.rects[:0], false
 	in.active = map[int]bool{}
 	in.run(data, &resources{dict: res})
 	return ctx.Err()
@@ -259,22 +275,39 @@ func (in *Interp) exec(op string, args []pdfobj.Object, p *pdfobj.Parser, res *r
 
 	// Paths matter only as clipping regions. Track the bounding box of
 	// the points; curves stay inside the hull of their control points.
-	case "m", "l":
-		in.pathPoint(num(args, n-2), num(args, n-1))
+	case "m":
+		x, y := in.pathPoint(num(args, n-2), num(args, n-1))
+		in.start, in.cur, in.hasCur = [2]float64{x, y}, [2]float64{x, y}, true
+	case "l":
+		x, y := in.pathPoint(num(args, n-2), num(args, n-1))
+		in.lineTo(x, y)
+	case "h":
+		if in.hasCur {
+			in.lineTo(in.start[0], in.start[1])
+		}
 	case "c":
 		for i := 6; i >= 2; i -= 2 {
-			in.pathPoint(num(args, n-i), num(args, n-i+1))
+			x, y := in.pathPoint(num(args, n-i), num(args, n-i+1))
+			in.cur = [2]float64{x, y} // a curve is no ruling: move without a segment
 		}
 	case "v", "y":
 		for i := 4; i >= 2; i -= 2 {
-			in.pathPoint(num(args, n-i), num(args, n-i+1))
+			x, y := in.pathPoint(num(args, n-i), num(args, n-i+1))
+			in.cur = [2]float64{x, y}
 		}
 	case "re":
 		x, y, w, h := num(args, n-4), num(args, n-3), num(args, n-2), num(args, n-1)
-		in.pathPoint(x, y)
-		in.pathPoint(x+w, y)
-		in.pathPoint(x, y+h)
-		in.pathPoint(x+w, y+h)
+		ax, ay := in.pathPoint(x, y)
+		bx, by := in.pathPoint(x+w, y)
+		cx, cy := in.pathPoint(x+w, y+h)
+		dx, dy := in.pathPoint(x, y+h)
+		if in.sink.Rule != nil && len(in.rects) < maxPathSegments {
+			in.rects = append(in.rects, [4]float64{
+				math.Min(math.Min(ax, bx), math.Min(cx, dx)), math.Min(math.Min(ay, by), math.Min(cy, dy)),
+				math.Max(math.Max(ax, bx), math.Max(cx, dx)), math.Max(math.Max(ay, by), math.Max(cy, dy)),
+			})
+		}
+		in.start, in.cur, in.hasCur = [2]float64{ax, ay}, [2]float64{ax, ay}, true
 	case "W", "W*":
 		in.clipNow = true
 	case "n", "S", "s", "f", "F", "f*", "B", "B*", "b", "b*":
@@ -286,7 +319,16 @@ func (in *Interp) exec(op string, args []pdfobj.Object, p *pdfobj.Parser, res *r
 				*c = in.path
 			}
 		}
+		if in.sink.Rule != nil && op != "n" {
+			if op == "s" || op == "b" || op == "b*" {
+				if in.hasCur {
+					in.lineTo(in.start[0], in.start[1]) // these close the path first
+				}
+			}
+			in.emitRules(op != "f" && op != "F" && op != "f*", op != "S" && op != "s")
+		}
 		in.path, in.clipNow = box{}, false
+		in.segs, in.rects, in.hasCur = in.segs[:0], in.rects[:0], false
 
 	// Text objects and text state.
 	case "BT":
@@ -433,7 +475,9 @@ func (in *Interp) pushMark(tag pdfobj.Name, props pdfobj.Dict) {
 		m.artifact = m.artifact || in.marks[k-1].artifact
 	}
 	if props != nil {
-		if id, ok := in.f.Int(in.ctx, props["MCID"]); ok && id >= 0 && id < 1<<31 {
+		// Identifiers inside a form XObject are numbered apart from the
+		// page's own, and would be mistaken for them.
+		if id, ok := in.f.Int(in.ctx, props["MCID"]); ok && id >= 0 && id < 1<<31 && in.depth == 0 {
 			m.mcid = int(id)
 		}
 		if s, ok := in.f.String(in.ctx, props["ActualText"]); ok {
@@ -457,11 +501,89 @@ func (in *Interp) font(res *resources, name pdfobj.Name) *font.Font {
 }
 
 // pathPoint adds a point, given in user space, to the current path.
-func (in *Interp) pathPoint(x, y float64) {
+func (in *Interp) pathPoint(x, y float64) (float64, float64) {
 	m := in.gs.ctm
 	px, py := m[0]*x+m[2]*y+m[4], m[1]*x+m[3]*y+m[5]
 	if finite(px, py) {
 		in.path.add(px, py)
+	}
+	return px, py
+}
+
+// maxPathSegments caps the segments and rectangles remembered for one path.
+const maxPathSegments = 4096
+
+// lineTo adds a straight segment from the current point.
+func (in *Interp) lineTo(x, y float64) {
+	if in.hasCur && in.sink.Rule != nil && len(in.segs) < maxPathSegments {
+		in.segs = append(in.segs, [4]float64{in.cur[0], in.cur[1], x, y})
+	}
+	in.cur, in.hasCur = [2]float64{x, y}, true
+}
+
+const (
+	// ruleSlack is how far a line may stray from horizontal or vertical,
+	// in points, and still count as a ruling.
+	ruleSlack = 0.75
+	// ruleThickness is the greatest thickness of a filled rectangle that
+	// is a line and not a box.
+	ruleThickness = 3.0
+	// ruleLength is the least length of a ruling.
+	ruleLength = 4.0
+)
+
+// emitRules reports the rulings in the path just painted: its straight
+// segments if it was stroked, and its thin rectangles if it was filled.
+func (in *Interp) emitRules(stroked, filled bool) {
+	emit := func(x0, y0, x1, y1 float64) {
+		if !finite(x0, y0, x1, y1) {
+			return
+		}
+		switch {
+		case math.Abs(y1-y0) <= ruleSlack && math.Abs(x1-x0) >= ruleLength:
+			y := (y0 + y1) / 2
+			in.sink.Rule(Rule{math.Min(x0, x1), y, math.Max(x0, x1), y})
+		case math.Abs(x1-x0) <= ruleSlack && math.Abs(y1-y0) >= ruleLength:
+			x := (x0 + x1) / 2
+			in.sink.Rule(Rule{x, math.Min(y0, y1), x, math.Max(y0, y1)})
+		}
+	}
+	if stroked {
+		for _, s := range in.segs {
+			emit(s[0], s[1], s[2], s[3])
+		}
+		for _, r := range in.rects {
+			emit(r[0], r[1], r[2], r[1])
+			emit(r[0], r[3], r[2], r[3])
+			emit(r[0], r[1], r[0], r[3])
+			emit(r[2], r[1], r[2], r[3])
+		}
+	}
+	if filled && !stroked {
+		for _, r := range in.rects {
+			w, h := r[2]-r[0], r[3]-r[1]
+			switch {
+			case h <= ruleThickness && w >= ruleLength:
+				emit(r[0], (r[1]+r[3])/2, r[2], (r[1]+r[3])/2)
+			case w <= ruleThickness && h >= ruleLength:
+				emit((r[0]+r[2])/2, r[1], (r[0]+r[2])/2, r[3])
+			}
+		}
+		// A thin rectangle drawn as four line segments.
+		if len(in.segs) == 4 && len(in.rects) == 0 {
+			b := box{}
+			for _, s := range in.segs {
+				b.add(s[0], s[1])
+				b.add(s[2], s[3])
+			}
+			w, h := b.x1-b.x0, b.y1-b.y0
+			switch {
+			case h <= ruleThickness && w >= ruleLength:
+				emit(b.x0, (b.y0+b.y1)/2, b.x1, (b.y0+b.y1)/2)
+			case w <= ruleThickness && h >= ruleLength:
+				emit((b.x0+b.x1)/2, b.y0, (b.x0+b.x1)/2, b.y1)
+			}
+		}
 	}
 }
 
@@ -640,6 +762,7 @@ func (in *Interp) xobject(o pdfobj.Object, parent *resources) {
 	savedTm, savedTlm, savedMarks := in.tm, in.tlm, len(in.marks)
 	in.stack = nil
 	in.path, in.clipNow = box{}, false
+	in.segs, in.rects, in.hasCur = in.segs[:0], in.rects[:0], false
 	in.gs.ctm = matrix.Mul(in.gs.ctm)
 	in.depth++
 	in.run(data, res)

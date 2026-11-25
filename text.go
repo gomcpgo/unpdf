@@ -84,10 +84,15 @@ func (d *Document) glyphWarnings() []Warning {
 
 const defaultMaxPageGlyphs = 500_000
 
+// maxPageRules caps the ruling lines kept for one page.
+const maxPageRules = 4000
+
 // pageContent is what interpreting a page's content stream yields.
 type pageContent struct {
 	glyphs []content.Glyph
 	images []content.Image
+	// rules are the straight lines drawn across or down the page.
+	rules []content.Rule
 	// shown counts the glyphs with text that a reader can see.
 	shown int
 }
@@ -147,6 +152,7 @@ func (p *Page) interpret(ctx context.Context) (*pageContent, error) {
 	pc := &pageContent{glyphs: make([]content.Glyph, 0, min(len(data)/8+16, d.maxPageGlyphs))}
 	counts := map[*font.Font]glyphCount{}
 	truncated := false
+	inAnnotations := false
 	sink := content.Sink{
 		Glyph: func(g *content.Glyph) bool {
 			if len(pc.glyphs) >= d.maxPageGlyphs {
@@ -166,11 +172,21 @@ func (p *Page) interpret(ctx context.Context) (*pageContent, error) {
 				pc.shown++
 			}
 			pc.glyphs = append(pc.glyphs, *g)
+			if inAnnotations {
+				// An annotation's marked content is numbered apart from
+				// the page's.
+				pc.glyphs[len(pc.glyphs)-1].MCID = -1
+			}
 			return true
 		},
 		Image: func(img content.Image) {
 			if len(pc.images) < 10_000 {
 				pc.images = append(pc.images, img)
+			}
+		},
+		Rule: func(r content.Rule) {
+			if len(pc.rules) < maxPageRules {
+				pc.rules = append(pc.rules, r)
 			}
 		},
 	}
@@ -182,6 +198,7 @@ func (p *Page) interpret(ctx context.Context) (*pageContent, error) {
 	if err := in.Run(ctx, data, res, content.Identity); err != nil {
 		return nil, err
 	}
+	inAnnotations = true
 	if err := p.annotations(ctx, in, res, pc); err != nil {
 		return nil, err
 	}
@@ -350,7 +367,12 @@ func (p *Page) Text(ctx context.Context) (string, error) {
 //     is the content.
 //
 // Text drawn twice on top of itself is dealt with later, word by word.
-func (p *Page) visible(glyphs []content.Glyph) []layout.Glyph {
+//
+// With tags, each glyph is given the number of the block that the
+// document's structure tree puts it in. The second result reports whether
+// the tags cover the page's text well enough to lay it out by them; when
+// they do not, no glyph is given a block.
+func (p *Page) visible(glyphs []content.Glyph, tags *pageTags) ([]layout.Glyph, bool) {
 	shown, hidden := 0, 0
 	for i := range glyphs {
 		if g := &glyphs[i]; g.Text != "" && g.Text != " " || !g.Mapped {
@@ -364,6 +386,7 @@ func (p *Page) visible(glyphs []content.Glyph) []layout.Glyph {
 	keepHidden := shown*10 < hidden
 
 	box := p.CropBox
+	tagged, loose := 0, 0
 	out := make([]layout.Glyph, 0, len(glyphs))
 	for i := range glyphs {
 		g := &glyphs[i]
@@ -376,7 +399,30 @@ func (p *Page) visible(glyphs []content.Glyph) []layout.Glyph {
 			continue
 		}
 		out = append(out, layout.Glyph{})
-		p.display(g, &out[len(out)-1])
+		lg := &out[len(out)-1]
+		p.display(g, lg)
+		if tags == nil || g.Artifact {
+			continue
+		}
+		if g.MCID >= 0 && g.MCID < len(tags.group) {
+			lg.Group = int(tags.group[g.MCID])
+		}
+		if strings.TrimSpace(lg.Text) != "" {
+			if lg.Group != 0 {
+				tagged++
+			} else {
+				loose++
+			}
+		}
 	}
-	return out
+	// Tags that leave out much of the page's text are not a sound basis
+	// for its layout. Text that a tagged document leaves untagged should
+	// be an artifact, and says so.
+	if tagged == 0 || loose*4 > tagged {
+		for i := range out {
+			out[i].Group = 0
+		}
+		return out, false
+	}
+	return out, true
 }

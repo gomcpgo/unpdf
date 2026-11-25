@@ -51,6 +51,12 @@ type Page struct {
 	furnished  bool
 	public     []Block // the blocks as Blocks returns them
 	classified bool
+	tables     []Table
+	tabled     bool
+	// tags is the structure tree's account of the page, when the page was
+	// laid out by it, and structTables the tables it marks.
+	tags         *pageTags
+	structTables []Table
 	// objNum is the number of the page object, 0 when it is not an
 	// indirect object. Destinations refer to pages by it.
 	objNum int

@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -36,12 +38,14 @@ type MarkdownOptions struct {
 }
 
 // Markdown converts the document to Markdown: headings, paragraphs with
-// their lines joined, list items, and links.
+// their lines joined, list items, tables and links.
 //
 // Structure is inferred from the layout. A heading is a short block set
 // larger or bolder than the body text, or one that matches an entry of the
-// document outline; its level follows its size. Tables are not recognised
-// yet, and come out as lines of text.
+// document outline; its level follows its size. A table is shown as a table
+// when Page.Tables finds it with a confidence of at least 0.5, and as lines
+// of text otherwise. Its first row becomes the header row. A table that
+// runs on over a page break is continued under the same header.
 func (d *Document) Markdown(ctx context.Context, opts MarkdownOptions) (string, error) {
 	var b strings.Builder
 	if err := d.WriteMarkdown(ctx, &b, opts); err != nil {
@@ -59,6 +63,8 @@ func (d *Document) WriteMarkdown(ctx context.Context, w io.Writer, opts Markdown
 	}
 	written := 0
 	first := true
+	var carry *tableTail // the table the last page ended with
+	last := 0            // the last page written
 	for page, err := range d.Pages(ctx) {
 		if err != nil {
 			return err
@@ -66,12 +72,17 @@ func (d *Document) WriteMarkdown(ctx context.Context, w io.Writer, opts Markdown
 		if !selected(page.Number) {
 			continue
 		}
-		text, err := page.markdown(ctx, opts)
+		if page.Number != last+1 {
+			carry = nil
+		}
+		last = page.Number
+		text, joins, tail, err := page.markdown(ctx, opts, carry)
 		if err != nil {
 			return err
 		}
+		carry = tail
 		var out strings.Builder
-		if !first {
+		if !first && !joins {
 			out.WriteString("\n")
 		}
 		if !opts.OmitPageMarkers {
@@ -145,15 +156,66 @@ type token struct {
 	link int // index into the page's links, or -1
 }
 
-// markdown renders one page.
-func (p *Page) markdown(ctx context.Context, opts MarkdownOptions) (string, error) {
+// minTableConfidence is the confidence from which Markdown shows a table
+// as a table.
+const minTableConfidence = 0.5
+
+// tableTail describes the table a page ends with, for the page after it.
+type tableTail struct {
+	header  []string
+	numeric []bool // which cells of its last row hold figures
+	width   float64
+}
+
+// continues reports whether rows, the table a page starts with, carries on
+// the table the page before ended with: the same number of columns, about
+// the same width, and a first row that either repeats the header or holds
+// figures where the row before the break held figures.
+func (t *tableTail) continues(rows [][]string, width float64) (repeated, ok bool) {
+	if t == nil || len(rows) == 0 || len(rows[0]) != len(t.header) || math.Abs(width-t.width) > 0.05*t.width {
+		return false, false
+	}
+	if slices.Equal(rows[0], t.header) {
+		return true, true
+	}
+	same, figures := 0, 0
+	for c, cell := range rows[0] {
+		n := numericCell(cell)
+		if n == t.numeric[c] {
+			same++
+		}
+		if n {
+			figures++
+		}
+	}
+	return false, figures > 0 && same*5 >= len(t.header)*4
+}
+
+func numericCell(s string) bool {
+	digits, letters := 0, 0
+	for _, r := range s {
+		switch {
+		case unicode.IsDigit(r):
+			digits++
+		case unicode.IsLetter(r):
+			letters++
+		}
+	}
+	return digits > 0 && digits >= letters
+}
+
+// markdown renders one page. carry describes the table the page before
+// ended with. It returns the page's text, whether that text continues the
+// last table of the page before with no break, and the table this page
+// ends with.
+func (p *Page) markdown(ctx context.Context, opts MarkdownOptions, carry *tableTail) (string, bool, *tableTail, error) {
 	blocks, err := p.Blocks(ctx)
 	if err != nil {
-		return "", err
+		return "", false, nil, err
 	}
 	links, err := p.Links(ctx)
 	if err != nil {
-		return "", err
+		return "", false, nil, err
 	}
 	// Only links that lead somewhere a reader of Markdown can follow.
 	var web []Link
@@ -162,93 +224,197 @@ func (p *Page) markdown(ctx context.Context, opts MarkdownOptions) (string, erro
 			web = append(web, l)
 		}
 	}
+	all, err := p.Tables(ctx)
+	if err != nil {
+		return "", false, nil, err
+	}
+	var tables []Table
+	for _, t := range all {
+		if t.Confidence >= minTableConfidence {
+			tables = append(tables, t)
+		}
+	}
+	tableAt := func(w Box) int {
+		for k := range tables {
+			if inside(w, tables[k].Box) {
+				return k
+			}
+		}
+		return -1
+	}
 
 	var out strings.Builder
-	prevList := false
-	wrote := false
-	for i := range blocks {
-		b := &blocks[i]
-		if b.Furniture && !opts.Furniture {
-			continue
-		}
-		lines := make([][]token, len(b.Lines))
-		for j, l := range b.Lines {
-			for _, w := range l.Words {
-				t := token{text: w.Text, link: -1}
-				for k := range web {
-					if inside(w.Box, web[k].Box) {
-						t.link = k
-						break
-					}
-				}
-				lines[j] = append(lines[j], t)
-			}
-		}
-		// Join words hyphenated across line ends.
-		for j := 0; j+1 < len(lines); j++ {
-			cur, next := lines[j], lines[j+1]
-			if len(cur) == 0 || len(next) == 0 || b.Lines[j].RTL {
-				continue
-			}
-			if stem, ok := layout.Hyphenated(cur[len(cur)-1].text, next[0].text); ok {
-				cur[len(cur)-1].text = stem + next[0].text
-				lines[j+1] = next[1:]
-			}
-		}
-
-		var text string
-		switch {
-		case b.Kind == Heading:
-			text = strings.Repeat("#", max(1, min(b.Level, 6))) + " " + inline(flatten(lines), web)
-		case b.Kind == ListItem:
-			toks := flatten(lines)
-			marker := "- "
-			if len(toks) > 0 {
-				first := toks[0].text
-				toks = toks[1:]
-				if n := strings.Trim(first, "()."); isDigits(n) {
-					marker = n + ". "
-				} else if ordered, _, _ := listMarker(first); ordered {
-					// Markdown numbers its lists with digits only: keep a
-					// letter or roman numeral as part of the text.
-					marker = "- " + first + " "
-				}
-			}
-			text = strings.Repeat("    ", max(0, b.Level)) + marker + inline(toks, web)
-		case isProse(b):
-			text = escapeStart(inline(flatten(lines), web))
-		default:
-			// Lines that do not run on: an address, a row of figures.
-			var rows []string
-			for _, l := range lines {
-				if len(l) > 0 {
-					rows = append(rows, escapeStart(inline(l, web)))
-				}
-			}
-			text = strings.Join(rows, "\n")
-		}
+	prevList, wrote, joins := false, false, false
+	var tail *tableTail
+	write := func(text string, list bool) {
 		if strings.TrimSpace(text) == "" {
-			continue
+			return
 		}
 		if wrote {
 			// List items sit together; everything else is set apart.
-			if b.Kind == ListItem && prevList {
+			if list && prevList {
 				out.WriteString("\n")
 			} else {
 				out.WriteString("\n\n")
 			}
 		}
 		out.WriteString(text)
-		wrote, prevList = true, b.Kind == ListItem
+		wrote, prevList, tail = true, list, nil
+	}
+	writeTable := func(t *Table) {
+		rows := t.rows()
+		if len(rows) == 0 {
+			return
+		}
+		width := t.Box.X1 - t.Box.X0
+		header, body := rows[0], rows[1:]
+		text := ""
+		if repeated, ok := carry.continues(rows, width); ok && !wrote {
+			// The table the page before ended with goes on here.
+			header = carry.header
+			if !repeated {
+				body = rows
+			}
+			if opts.OmitPageMarkers {
+				// Nothing stands between the two parts: add the rows.
+				text, joins = pipeTable(nil, body), true
+			}
+		}
+		if text == "" {
+			text = pipeTable(header, body)
+		}
+		write(text, false)
+		tail = &tableTail{header: header, width: width, numeric: make([]bool, len(header))}
+		for c, cell := range rows[len(rows)-1] {
+			tail.numeric[c] = numericCell(cell)
+		}
+	}
+	shown := make([]bool, len(tables))
+	for i := range blocks {
+		b := &blocks[i]
+		if b.Furniture && !opts.Furniture {
+			continue
+		}
+		if len(tables) == 0 {
+			write(renderBlock(b, web), b.Kind == ListItem)
+			continue
+		}
+		// The words that are part of a table are left out here; the table
+		// takes their place, where the first of them stood.
+		rest := Block{Angle: b.Angle, Kind: b.Kind, Level: b.Level, Marker: b.Marker}
+		whole := true
+		flush := func() {
+			if len(rest.Lines) == 0 {
+				return
+			}
+			if whole && len(rest.Lines) == len(b.Lines) {
+				write(renderBlock(b, web), b.Kind == ListItem)
+			} else {
+				rest.Box = rest.Lines[0].Box
+				for _, l := range rest.Lines[1:] {
+					rest.Box.X0, rest.Box.Y0 = math.Min(rest.Box.X0, l.Box.X0), math.Min(rest.Box.Y0, l.Box.Y0)
+					rest.Box.X1, rest.Box.Y1 = math.Max(rest.Box.X1, l.Box.X1), math.Max(rest.Box.Y1, l.Box.Y1)
+				}
+				write(renderBlock(&rest, web), rest.Kind == ListItem)
+			}
+			rest.Lines, rest.Kind, rest.Level, rest.Marker = nil, Paragraph, 0, ""
+		}
+		for _, l := range b.Lines {
+			kept := l.Words[:0:0]
+			for _, w := range l.Words {
+				k := tableAt(w.Box)
+				if k < 0 || b.Angle != 0 {
+					kept = append(kept, w)
+					continue
+				}
+				whole = false
+				if !shown[k] {
+					flush()
+					writeTable(&tables[k])
+					shown[k] = true
+				}
+			}
+			switch {
+			case len(kept) == len(l.Words):
+				rest.Lines = append(rest.Lines, l)
+			case len(kept) > 0:
+				part := Line{Words: kept, RTL: l.RTL, Box: kept[0].Box}
+				for _, w := range kept[1:] {
+					part.Box.X0, part.Box.Y0 = math.Min(part.Box.X0, w.Box.X0), math.Min(part.Box.Y0, w.Box.Y0)
+					part.Box.X1, part.Box.Y1 = math.Max(part.Box.X1, w.Box.X1), math.Max(part.Box.Y1, w.Box.Y1)
+				}
+				rest.Lines = append(rest.Lines, part)
+				rest.Kind, rest.Level, rest.Marker = Paragraph, 0, ""
+			}
+		}
+		flush()
 	}
 	if !wrote {
 		if scanned, err := p.Scanned(ctx); err != nil {
-			return "", err
+			return "", false, nil, err
 		} else if scanned {
-			return "<!-- this page is a scanned image with no text layer -->", nil
+			return "<!-- this page is a scanned image with no text layer -->", false, nil, nil
 		}
 	}
-	return out.String(), nil
+	return out.String(), joins, tail, nil
+}
+
+// renderBlock writes one block as Markdown.
+func renderBlock(b *Block, web []Link) string {
+	lines := make([][]token, len(b.Lines))
+	for j, l := range b.Lines {
+		for _, w := range l.Words {
+			t := token{text: w.Text, link: -1}
+			for k := range web {
+				if inside(w.Box, web[k].Box) {
+					t.link = k
+					break
+				}
+			}
+			lines[j] = append(lines[j], t)
+		}
+	}
+	// Join words hyphenated across line ends.
+	for j := 0; j+1 < len(lines); j++ {
+		cur, next := lines[j], lines[j+1]
+		if len(cur) == 0 || len(next) == 0 || b.Lines[j].RTL {
+			continue
+		}
+		if stem, ok := layout.Hyphenated(cur[len(cur)-1].text, next[0].text); ok {
+			cur[len(cur)-1].text = stem + next[0].text
+			lines[j+1] = next[1:]
+		}
+	}
+
+	switch {
+	case b.Kind == Heading:
+		return strings.Repeat("#", max(1, min(b.Level, 6))) + " " + inline(flatten(lines), web)
+	case b.Kind == ListItem:
+		toks := flatten(lines)
+		marker := "- "
+		if len(toks) > 0 && b.Marker != "" {
+			first := toks[0].text
+			toks = toks[1:]
+			if n := strings.Trim(first, "()."); isDigits(n) {
+				marker = n + ". "
+			} else if ordered, _, _ := listMarker(first); ordered {
+				// Markdown numbers its lists with digits only: keep a
+				// letter or roman numeral as part of the text.
+				marker = "- " + first + " "
+			}
+		}
+		return strings.Repeat("    ", max(0, b.Level)) + marker + inline(toks, web)
+	case isProse(b):
+		return escapeStart(inline(flatten(lines), web))
+	}
+	// Lines that do not run on: an address, a row of figures.
+	var rows []string
+	for _, l := range lines {
+		if len(l) > 0 {
+			rows = append(rows, escapeStart(inline(l, web)))
+		}
+	}
+	return strings.Join(rows, "\n")
 }
 
 func flatten(lines [][]token) []token {
