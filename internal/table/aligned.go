@@ -327,6 +327,13 @@ func align(words []Word, lines []Line, hs []hline) (Table, bool) {
 		return Table{}, false
 	}
 
+	// The header's lines become one row for each level of headings. The
+	// lines still count as evidence of a table.
+	asLines, lineCount, header := rows, len(rows), 0
+	if !unsure {
+		rows, header = joinHeader(words, rows, cols, hs)
+	}
+
 	t := Table{X0: x0, X1: x1, Y0: y0, Y1: y1, Rows: len(rows), Cols: cols, Method: "alignment"}
 	edges := columnEdges(words, rows, cols)
 	bounds := make([]float64, cols+1)
@@ -334,22 +341,39 @@ func align(words []Word, lines []Line, hs []hline) (Table, bool) {
 	for c := 1; c < cols; c++ {
 		bounds[c] = (edges[c-1][1] + edges[c][0]) / 2
 	}
+	// How full the rows are and how many cells hold figures are counted on
+	// the lines as they stood, so that joining the header's lines leaves
+	// the confidence where it was.
 	well, numeric, nonEmpty := 0, 0, 0
 	need := max(2, (cols*3+4)/5)
-	for r, rw := range rows {
+	count := func(rw row, text func(c int) string) {
 		if rw.filled() >= need {
 			well++
 		}
-		for c, idx := range rw.cells {
-			cell := Cell{Row: r, Col: c, RowSpan: 1, ColSpan: 1, X0: bounds[c], X1: bounds[c+1], Y0: rw.y0, Y1: rw.y1, Words: idx}
-			cell.Text = cellText(words, idx)
-			if cell.Text != "" {
+		for c := range rw.cells {
+			if s := text(c); s != "" {
 				nonEmpty++
-				if isNumeric(cell.Text) {
+				if isNumeric(s) {
 					numeric++
 				}
 			}
+		}
+	}
+	joined := lineCount != len(rows)
+	if joined {
+		for _, rw := range asLines[:lineCount-(len(rows)-header)] {
+			count(rw, func(c int) string { return cellText(words, rw.cells[c]) })
+		}
+	}
+	for r, rw := range rows {
+		at := len(t.Cells)
+		for c, idx := range rw.cells {
+			cell := Cell{Row: r, Col: c, RowSpan: 1, ColSpan: 1, X0: bounds[c], X1: bounds[c+1], Y0: rw.y0, Y1: rw.y1, Words: idx}
+			cell.Text = cellText(words, idx)
 			t.Cells = append(t.Cells, cell)
+		}
+		if !joined || r >= header {
+			count(rw, func(c int) string { return t.Cells[at+c].Text })
 		}
 	}
 
@@ -358,19 +382,19 @@ func align(words []Word, lines []Line, hs []hline) (Table, bool) {
 	// most cells filled, cells holding numbers and rules across the width
 	// each add to it; lines that run across the column gaps take away.
 	conf := 0.4
-	if len(rows) >= 4 {
+	if lineCount >= 4 {
 		conf += 0.05
 	}
-	if len(rows) >= 6 {
+	if lineCount >= 6 {
 		conf += 0.05
 	}
 	if cols >= 3 {
 		conf += 0.15
 	}
 	switch {
-	case well*10 >= len(rows)*7:
+	case well*10 >= lineCount*7:
 		conf += 0.15
-	case well*2 >= len(rows):
+	case well*2 >= lineCount:
 		conf += 0.05
 	}
 	figures := nonEmpty > 0 && numeric*10 >= nonEmpty*3
@@ -387,14 +411,16 @@ func align(words []Word, lines []Line, hs []hline) (Table, bool) {
 		// Prose in columns with nothing to mark the rows; a numbered list
 		// with its numbers set apart; a table of contents.
 		conf = math.Min(conf, 0.3)
-	case well*2 < len(rows), len(rows) < 5 && well < len(rows) && bounding < 2, cols == 2 && !figures && bounding < 2:
+	case well*2 < lineCount, lineCount < 5 && well < lineCount && bounding < 2, cols == 2 && !figures && bounding < 2:
 		// Too ragged; or small, not full and not ruled off, like the
 		// labels of a chart; or two columns of words with nothing else to
 		// say it is a table: labels and their values, most often.
 		conf = math.Min(conf, 0.45)
 	}
 	t.Confidence = math.Max(0.1, conf)
-	t.HeaderRows = headerRows(words, &t)
+	if t.HeaderRows = header; header == 0 {
+		t.HeaderRows = headerRows(words, &t)
+	}
 	return t, true
 }
 

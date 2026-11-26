@@ -252,6 +252,101 @@ func TestTableMarkdownEdges(t *testing.T) {
 	}
 }
 
+func TestTableMarkdownHeaderRows(t *testing.T) {
+	// Two levels of headings: a group over two columns, a heading that
+	// runs down both levels, a heading of two lines.
+	tb := Table{Rows: 4, Cols: 4, HeaderRows: 2, Cells: []TableCell{
+		{Row: 0, Col: 0, RowSpan: 2, ColSpan: 1, Text: "Year"},
+		{Row: 0, Col: 1, RowSpan: 1, ColSpan: 2, Text: "Coal"},
+		{Row: 0, Col: 3, RowSpan: 2, ColSpan: 1, Text: "Percent\nchange"},
+		{Row: 1, Col: 1, RowSpan: 1, ColSpan: 1, Text: "Nominal"},
+		{Row: 1, Col: 2, RowSpan: 1, ColSpan: 1, Text: "Real"},
+		{Row: 2, Col: 0, Text: "2010"}, {Row: 2, Col: 1, Text: "35.61"}, {Row: 2, Col: 2, Text: "32.11"}, {Row: 2, Col: 3, Text: "6.9"},
+		{Row: 3, Col: 0, Text: "2011"}, {Row: 3, Col: 1, Text: "36.91"}, {Row: 3, Col: 2, Text: "32.56"}, {Row: 3, Col: 3, Text: "1.4"},
+	}}
+	want := "| Year | Coal / Nominal | Coal / Real | Percent change |\n| --- | --- | --- | --- |\n" +
+		"| 2010 | 35.61 | 32.11 | 6.9 |\n| 2011 | 36.91 | 32.56 | 1.4 |"
+	if got := tb.Markdown(); got != want {
+		t.Errorf("two levels:\n%s", got)
+	}
+	// The rows are what they were: Grid joins nothing.
+	if got := tb.Grid(); got[0][1] != "Coal" || got[1][1] != "Nominal" || got[1][0] != "" || len(got) != 4 {
+		t.Errorf("grid = %q", got)
+	}
+	// With the header rows not known, the first row is the header row.
+	plain := tb
+	plain.HeaderRows = 0
+	if got := plain.Markdown(); !strings.HasPrefix(got, "| Year | Coal |  | Percent change |\n| --- | --- | --- | --- |\n|  | Nominal | Real |  |\n| 2010 |") {
+		t.Errorf("no header rows known:\n%s", got)
+	}
+	plain.HeaderRows = 1
+	if got := plain.Markdown(); !strings.HasPrefix(got, "| Year | Coal |  | Percent change |\n| --- | --- | --- | --- |\n|  | Nominal | Real |  |\n| 2010 |") {
+		t.Errorf("one header row:\n%s", got)
+	}
+
+	// A line across the whole table is the heading of no one column; the
+	// same heading twice over a column is said once; a column with no text
+	// goes, though a group stands over it.
+	tb = Table{Rows: 4, Cols: 4, HeaderRows: 3, Cells: []TableCell{
+		{Row: 0, Col: 0, RowSpan: 1, ColSpan: 4, Text: "Millions of dollars"},
+		{Row: 1, Col: 0, RowSpan: 1, ColSpan: 1, Text: "Year"}, {Row: 1, Col: 1, RowSpan: 1, ColSpan: 3, Text: "Sales"},
+		{Row: 2, Col: 1, RowSpan: 1, ColSpan: 1, Text: "Sales"}, {Row: 2, Col: 3, RowSpan: 1, ColSpan: 1, Text: "a|b"},
+		{Row: 3, Col: 0, Text: "2010"}, {Row: 3, Col: 1, Text: "12"}, {Row: 3, Col: 3, Text: "14"},
+	}}
+	if got, want := tb.Markdown(), "| Millions of dollars / Year | Sales | Sales / a\\|b |\n| --- | --- | --- |\n| 2010 | 12 | 14 |"; got != want {
+		t.Errorf("a line across, a heading twice, an empty column:\n%s", got)
+	}
+
+	// Header rows that would leave no row under them: the last row stays.
+	tb = Table{Rows: 2, Cols: 2, HeaderRows: 2, Cells: []TableCell{
+		{Row: 0, Col: 0, Text: "Name"}, {Row: 0, Col: 1, Text: "Town"}, {Row: 1, Col: 0, Text: "Ada"}, {Row: 1, Col: 1, Text: "Leeds"},
+	}}
+	if got, want := tb.Markdown(), "| Name | Town |\n| --- | --- |\n| Ada | Leeds |"; got != want {
+		t.Errorf("all rows headers:\n%s", got)
+	}
+	if got := (Table{Rows: 3, Cols: 2, HeaderRows: 2}).Markdown(); got != "" {
+		t.Errorf("no text: %q", got)
+	}
+}
+
+func TestHeaderOfSeveralLinesInMarkdown(t *testing.T) {
+	// Column headings of one, two and three lines over rows of figures,
+	// and the same table going on over the page under the same headings.
+	header := func(y int) string {
+		return cells(y, 250, "Total number", 430, "Number") +
+			cells(y-12, 250, "of shares", 340, "Average price", 430, "that may") +
+			cells(y-24, 72, "Period", 250, "purchased", 340, "paid per share", 430, "yet be bought")
+	}
+	rowsA := cells(640, 72, "October", 250, "1,815", 340, "522.10", 430, "900") +
+		cells(626, 72, "November", 250, "2,204", 340, "531.75", 430, "850") +
+		cells(612, 72, "December", 250, "1,960", 340, "540.20", 430, "800")
+	rowsB := cells(640, 72, "January", 250, "1,422", 340, "548.00", 430, "760") +
+		cells(626, 72, "February", 250, "1,507", 340, "551.30", 430, "720") +
+		cells(612, 72, "March", 250, "1,633", 340, "559.90", 430, "690")
+	head := "| Period | Total number of shares purchased | Average price paid per share | Number that may yet be bought |\n| --- | --- | --- | --- |\n"
+	bodyA := "| October | 1,815 | 522.10 | 900 |\n| November | 2,204 | 531.75 | 850 |\n| December | 1,960 | 540.20 | 800 |\n"
+	bodyB := "| January | 1,422 | 548.00 | 760 |\n| February | 1,507 | 551.30 | 720 |\n| March | 1,633 | 559.90 | 690 |\n"
+
+	doc := pagesOf(t, header(680)+rowsA, header(680)+rowsB)
+	p, _ := doc.Page(ctx, 1)
+	tables, err := p.Tables(ctx)
+	if err != nil || len(tables) != 1 {
+		t.Fatalf("tables = %+v, %v", tables, err)
+	}
+	if tb := tables[0]; tb.Rows != 4 || tb.Cols != 4 || tb.HeaderRows != 1 || tb.Cells[1].Text != "Total number\nof shares\npurchased" {
+		t.Errorf("table: %d x %d, %d header rows, cells %+v", tb.Rows, tb.Cols, tb.HeaderRows, tb.Cells[:4])
+	}
+	md, _ := doc.Markdown(ctx, MarkdownOptions{})
+	if want := "<!-- page 1 -->\n\n" + head + bodyA + "\n<!-- page 2 -->\n\n" + head + bodyB; md != want {
+		t.Errorf("Markdown:\n%s", md)
+	}
+	// With nothing between the pages the header is said once.
+	md, _ = doc.Markdown(ctx, MarkdownOptions{OmitPageMarkers: true})
+	if want := head + bodyA + bodyB; md != want {
+		t.Errorf("Markdown without page markers:\n%s", md)
+	}
+}
+
 func TestCleanCell(t *testing.T) {
 	for in, want := range map[string]string{
 		"Alabama ............................": "Alabama",

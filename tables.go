@@ -35,8 +35,9 @@ type Table struct {
 	// Cells holds the cells row by row. A cell merged over several rows or
 	// columns appears once, at its top-left position.
 	Cells []TableCell
-	// HeaderRows is the number of rows at the top known to be headings. It
-	// is 0 when nothing sets them apart.
+	// HeaderRows is the number of rows at the top known to be headings: one
+	// for each level of headings, a heading set over several lines being
+	// one cell. It is 0 when nothing sets them apart.
 	HeaderRows int
 	// Confidence says how sure the detection is, from 0 to 1. A table the
 	// document itself marks, or one drawn as a full grid, is near 1. One
@@ -80,15 +81,86 @@ func (t Table) Grid() [][]string {
 	return grid
 }
 
-// Markdown returns the table as a Markdown pipe table. The first row is the
-// header row, as Markdown requires one. Rows and columns with no text are
-// left out, and the lines of a cell are joined.
+// Markdown returns the table as a Markdown pipe table. Markdown has one
+// header row. Where the table's header rows are known, they are that row:
+// each column's heading is what the header rows hold over it, from the top
+// down, joined with " / ", and a heading merged across several columns is
+// repeated over each. Where they are not known, the first row is the header
+// row. Rows and columns with no text are left out, and the lines of a cell
+// are joined.
 func (t Table) Markdown() string {
-	rows := t.rows()
-	if len(rows) == 0 {
+	header, body := t.headed()
+	if header == nil {
 		return ""
 	}
-	return pipeTable(rows[0], rows[1:])
+	return pipeTable(header, body)
+}
+
+// headed returns the table's text ready for Markdown, as a header row and
+// the rows under it: each cell on one line, with empty rows and columns
+// removed. The header is nil when the table has no text.
+func (t Table) headed() (header []string, body [][]string) {
+	if t.HeaderRows < 2 || t.Rows < 2 {
+		rows := t.rows()
+		if len(rows) == 0 {
+			return nil, nil
+		}
+		return rows[0], rows[1:]
+	}
+	levels := min(t.HeaderRows, t.Rows-1)
+	grid := t.Grid()
+	// The headings over each column, from the top level down.
+	over := make([][]string, t.Cols)
+	for r := 0; r < levels; r++ {
+		for _, c := range t.Cells {
+			text := cellLine(c.Text)
+			if c.Row != r || text == "" || c.Col < 0 || c.Col >= t.Cols {
+				continue
+			}
+			span := max(1, c.ColSpan)
+			if span >= t.Cols {
+				span = 1 // a line across the whole table heads no one column
+			}
+			for col := c.Col; col < min(c.Col+span, t.Cols); col++ {
+				if n := len(over[col]); n == 0 || over[col][n-1] != text {
+					over[col] = append(over[col], text)
+				}
+			}
+		}
+	}
+	// Rows and columns are kept as rows does it: a column stays when a cell
+	// that stands in it has text.
+	keepCol := make([]bool, t.Cols)
+	for r, row := range grid {
+		empty := true
+		for c, text := range row {
+			row[c] = cellLine(text)
+			if row[c] != "" {
+				keepCol[c], empty = true, false
+			}
+		}
+		if r >= levels && !empty {
+			body = append(body, row)
+		}
+	}
+	for c := range over {
+		if keepCol[c] {
+			header = append(header, strings.Join(over[c], " / "))
+		}
+	}
+	if len(header) == 0 {
+		return nil, nil
+	}
+	for r, row := range body {
+		out := row[:0]
+		for c, text := range row {
+			if keepCol[c] {
+				out = append(out, text)
+			}
+		}
+		body[r] = out
+	}
+	return header, body
 }
 
 // rows returns the table's text ready for Markdown: each cell on one line,

@@ -304,8 +304,12 @@ func tables(ctx context.Context, args []string) error {
 			if t.Confidence < *least {
 				continue
 			}
-			fmt.Printf("page %d, table %d: %d rows, %d columns, found from %s, confidence %.2f\n\n%s\n\n",
-				page.Number, i+1, t.Rows, t.Cols, t.Method, t.Confidence, t.Markdown())
+			rows := fmt.Sprintf("%d rows", t.Rows)
+			if t.HeaderRows > 0 {
+				rows += fmt.Sprintf(" (%d header)", t.HeaderRows)
+			}
+			fmt.Printf("page %d, table %d: %s, %d columns, found from %s, confidence %.2f\n\n%s\n\n",
+				page.Number, i+1, rows, t.Cols, t.Method, t.Confidence, t.Markdown())
 		}
 	}
 	return nil
