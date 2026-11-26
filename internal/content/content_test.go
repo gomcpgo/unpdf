@@ -395,6 +395,16 @@ func FuzzRun(f *testing.F) {
 				return n < 10000
 			},
 			Image: func(Image) {},
+			Rule: func(r Rule) {
+				if math.IsNaN(r.X0+r.Y0+r.X1+r.Y1) || math.IsInf(r.X0+r.Y0+r.X1+r.Y1, 0) {
+					t.Fatalf("non-finite rule %+v", r)
+				}
+			},
+			Shape: func(s Shape) {
+				if math.IsNaN(s.X0+s.Y0+s.X1+s.Y1) || math.IsInf(s.X0+s.Y0+s.X1+s.Y1, 0) || s.X1 < s.X0 || s.Y1 < s.Y0 {
+					t.Fatalf("bad shape %+v", s)
+				}
+			},
 		})
 		in.Run(ctx, content, resources, Identity)
 	})
@@ -455,6 +465,61 @@ func TestRules(t *testing.T) {
 	b.WriteString("S")
 	if got := fx.rules(b.String()); len(got) > maxPathSegments {
 		t.Errorf("%d rules from one path, more than the %d segments kept", len(got), maxPathSegments)
+	}
+}
+
+func TestShapes(t *testing.T) {
+	fx := newFixture(t, func(b *pdftest.Builder) string {
+		form := b.AddStream("<< /Type /XObject /Subtype /Form /BBox [0 0 100 100] /Matrix [1 0 0 1 0 500] >>", []byte("0 0 m 30 40 l S"))
+		return fmt.Sprintf("/Fm %d 0 R", form)
+	})
+	shapes := func(content string) []Shape {
+		var out []Shape
+		in := New(fx.f, font.NewCache(fx.f), Sink{Shape: func(s Shape) { out = append(out, s) }})
+		in.Run(ctx, []byte(content), fx.res, Identity)
+		return out
+	}
+	for _, tc := range []struct {
+		name, content string
+		want          []Shape
+	}{
+		{"a curve, with its control points", "10 100 m 20 120 40 120 200 100 c S", []Shape{{10, 100, 200, 120}}},
+		{"a curve given by two points", "10 100 m 40 130 200 100 v S", []Shape{{10, 100, 200, 130}}},
+		{"a slanting line", "10 10 m 200 100 l S", []Shape{{10, 10, 200, 100}}},
+		{"lines across and down are rulings", "10 100 m 200 100 l 200 20 l S", nil},
+		{"a box is rulings", "10 20 100 50 re S", nil},
+		{"a filled box", "10 20 100 50 re f", nil},
+		{"a path that is not painted", "10 10 m 200 100 l n", nil},
+		{"a line of a chart is one shape", "10 10 m 30 40 l 50 20 l 70 60 l S", []Shape{{10, 10, 70, 60}}},
+		{"two strokes in one path", "10 10 m 30 40 l 100 10 m 130 40 l S", []Shape{{10, 10, 30, 40}, {100, 10, 130, 40}}},
+		{"a filled arrowhead", "50 50 m 55 60 l 60 50 l h f", []Shape{{50, 50, 60, 60}}},
+		{"the rounded corners of a box, not its sides",
+			"20 10 m 90 10 l 100 10 100 10 100 20 c 100 70 l 100 80 100 80 90 80 c 20 80 l 10 80 10 80 10 70 c 10 20 l 10 10 10 10 20 10 c h S",
+			[]Shape{{90, 10, 100, 20}, {90, 70, 100, 80}, {10, 70, 20, 80}, {10, 10, 20, 20}}},
+		{"the transformation applies", "2 0 0 2 5 5 cm 10 10 m 20 30 l S", []Shape{{25, 25, 45, 65}}},
+		{"what the clipping path leaves", "0 0 50 50 re W n 10 10 m 200 100 l S", []Shape{{10, 10, 50, 50}}},
+		{"hidden by the clipping path", "0 0 5 5 re W n 10 10 m 200 100 l S", nil},
+		{"a line inside a form", "/Fm Do", []Shape{{0, 500, 30, 540}}},
+		{"a path left open by a form does not leak", "10 10 m /Fm Do 200 100 l S", []Shape{{0, 500, 30, 540}}},
+	} {
+		got := shapes(tc.content)
+		ok := len(got) == len(tc.want)
+		for i := 0; ok && i < len(got); i++ {
+			ok = near(got[i].X0, tc.want[i].X0) && near(got[i].Y0, tc.want[i].Y0) && near(got[i].X1, tc.want[i].X1) && near(got[i].Y1, tc.want[i].Y1)
+		}
+		if !ok {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+
+	// A path with more pieces than are kept does no harm.
+	var b strings.Builder
+	for i := 0; i < 3*maxPathSegments; i++ {
+		fmt.Fprintf(&b, "%d 0 m %d 9 l ", i%500, i%500+7)
+	}
+	b.WriteString("S")
+	if got := shapes(b.String()); len(got) != maxPathSegments {
+		t.Errorf("%d shapes from one path, want the %d that are kept", len(got), maxPathSegments)
 	}
 }
 

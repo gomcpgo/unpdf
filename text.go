@@ -84,8 +84,12 @@ func (d *Document) glyphWarnings() []Warning {
 
 const defaultMaxPageGlyphs = 500_000
 
-// maxPageRules caps the ruling lines kept for one page.
-const maxPageRules = 4000
+// maxPageRules caps the ruling lines kept for one page, and maxPageShapes
+// the pieces of other drawing.
+const (
+	maxPageRules  = 4000
+	maxPageShapes = 4000
+)
 
 // pageContent is what interpreting a page's content stream yields.
 type pageContent struct {
@@ -97,8 +101,11 @@ type pageContent struct {
 	inlineDropped bool
 	// rules are the straight lines drawn across or down the page.
 	rules []content.Rule
-	// shown counts the glyphs with text that a reader can see.
-	shown int
+	// shapes are the other things drawn: curves and lines that slant.
+	shapes []content.Shape
+	// shown counts the glyphs with text that a reader can see, and hidden
+	// those drawn invisibly, as the text layer of a scan is.
+	shown, hidden int
 }
 
 // contentBytes returns the page's content streams, decoded and joined. A
@@ -172,8 +179,12 @@ func (p *Page) interpret(ctx context.Context) (*pageContent, error) {
 				}
 				counts[g.Font] = c
 			}
-			if !g.Invisible && !g.Clipped && strings.TrimSpace(g.Text) != "" {
-				pc.shown++
+			if !g.Clipped && strings.TrimSpace(g.Text) != "" {
+				if g.Invisible {
+					pc.hidden++
+				} else {
+					pc.shown++
+				}
 			}
 			pc.glyphs = append(pc.glyphs, *g)
 			if inAnnotations {
@@ -201,6 +212,11 @@ func (p *Page) interpret(ctx context.Context) (*pageContent, error) {
 		Rule: func(r content.Rule) {
 			if len(pc.rules) < maxPageRules {
 				pc.rules = append(pc.rules, r)
+			}
+		},
+		Shape: func(s content.Shape) {
+			if len(pc.shapes) < maxPageShapes {
+				pc.shapes = append(pc.shapes, s)
 			}
 		},
 	}
