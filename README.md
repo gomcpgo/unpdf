@@ -170,7 +170,7 @@ go run github.com/gomcpgo/unpdf/cmd/unpdf images -out pictures report.pdf
   - From the structure tree of a tagged PDF, with merged cells and header rows as tagged.
   - From ruling lines that form a grid, with merged cells. Rows that no rule separates, as in most statistical tables, are told apart by their lines of text, and row labels that stand outside the grid are taken in.
   - From text that lines up in columns over three or more rows, with no lines drawn. Cells of more than one line, currency signs set in a column of their own and labels that wrap are put back together.
-  - Each with a confidence. Forms, charts, tables of contents and numbered lists, which can look like tables, score low.
+  - Each with a confidence. Forms, charts, tables of contents and numbered lists, which can look like tables, score low. So does text that lines up among the curves and slanting lines of a diagram or a chart, or on a picture: the labels of a figure, not the cells of a table.
   - A title drawn or tagged as the table's first row, and notes as its last rows, are left out of the table and read as text around it. Dot leaders are left out of cells. A line that names a group of rows is a row of its own.
   - In Markdown, a table that runs on over a page break is continued under the same header.
 - Images:

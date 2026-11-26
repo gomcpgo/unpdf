@@ -481,6 +481,14 @@ func FuzzTables(f *testing.F) {
 		check(Ruled(words, rules))
 		aligned, member := Aligned(words, lines, rules)
 		check(aligned)
+		// The rules stand in for what else is drawn on the page.
+		drawn := make([]Box, len(rules))
+		for i, r := range rules {
+			drawn[i] = Box{math.Min(r.X0, r.X1), math.Min(r.Y0, r.Y1), math.Max(r.X0, r.X1), math.Max(r.Y0, r.Y1)}
+		}
+		for i := range aligned {
+			Figure(&aligned[i], drawn, drawn)
+		}
 		if len(member) != len(lines) {
 			t.Fatalf("%d memberships for %d lines", len(member), len(lines))
 		}

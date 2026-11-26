@@ -263,6 +263,16 @@ func (p *Page) Tables(ctx context.Context) ([]Table, error) {
 		}
 	}
 	aligned, _ := table.Aligned(words, rest, rules)
+	if len(aligned) > 0 {
+		// Text that lines up among the arcs of a diagram, or on a picture,
+		// is the labels of a figure.
+		shapes, pictures := p.figures()
+		for i := range aligned {
+			if table.Figure(&aligned[i], shapes, pictures) {
+				aligned[i].Confidence = math.Min(aligned[i].Confidence, figureConfidence)
+			}
+		}
+	}
 	found = append(found, aligned...)
 	for _, t := range found {
 		if rtl*2 > len(lines) {
@@ -286,6 +296,41 @@ func (p *Page) Tables(ctx context.Context) ([]Table, error) {
 	})
 	p.tables, p.tabled = out, true
 	return out, nil
+}
+
+// figureConfidence is the most confidence a table can have when what is
+// drawn around its text says it is a figure.
+const figureConfidence = 0.3
+
+// figures returns what is drawn on the page that tells a figure from a
+// table, in display space: the curves and slanting lines, and the pictures.
+// A picture that takes up half the page or more is its background, not a
+// figure on it, and where most of the text is hidden, as on a scan with a
+// text layer, the pictures are the page itself: neither is returned.
+func (p *Page) figures() (shapes, pictures []table.Box) {
+	pc := p.content
+	if pc == nil {
+		return nil, nil
+	}
+	shapes = make([]table.Box, len(pc.shapes))
+	for i, s := range pc.shapes {
+		shapes[i] = table.Box(p.displayBox(Rect{s.X0, s.Y0, s.X1, s.Y1}))
+	}
+	if pc.hidden > pc.shown {
+		return shapes, nil
+	}
+	w, h := p.Size()
+	for i := range pc.images {
+		img := &pc.images[i]
+		if img.Hidden {
+			continue
+		}
+		b := p.displayBox(Rect{img.VX0, img.VY0, img.VX1, img.VY1})
+		if (b.X1-b.X0)*(b.Y1-b.Y0) < 0.5*w*h {
+			pictures = append(pictures, table.Box(b))
+		}
+	}
+	return shapes, pictures
 }
 
 // cleanCell takes out of a cell's text what leads the eye and says nothing:

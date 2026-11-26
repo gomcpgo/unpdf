@@ -263,6 +263,90 @@ func TestTitleAndNotesAreNotRows(t *testing.T) {
 	}
 }
 
+func TestDiagramIsNotATable(t *testing.T) {
+	// The labels of a block diagram: four rows of three, lined up.
+	labels := cells(660, 72, "conv one", 250, "conv two", 400, "conv six") +
+		cells(640, 72, "pool one", 250, "pool two", 400, "pool six") +
+		cells(620, 72, "norm one", 250, "norm two", 400, "norm six") +
+		cells(600, 72, "full one", 250, "full two", 400, "full six")
+	const shown = "| conv one | conv two | conv six |"
+	for _, tc := range []struct {
+		name, drawing string
+		table         bool
+	}{
+		{"nothing drawn", "", true},
+		// An arc that skips from the first box to the third, as the
+		// shortcut of a network diagram does.
+		{"an arc from row to row", "0.5 w 130 664 m 160 650 160 630 130 624 c S ", false},
+		{"a slanting arrow from row to row", "0.5 w 200 660 m 240 622 l S ", false},
+		// What may be drawn in a table: rules, a frame with rounded
+		// corners, a tick beside an entry.
+		{"rules between the rows", "0.5 w 72 652 m 450 652 l S 72 632 m 450 632 l S 72 612 m 450 612 l S ", true},
+		{"a frame with rounded corners", "0.5 w 70 590 m 446 590 l 452 590 452 590 452 596 c 452 668 l 452 674 452 674 446 674 c " +
+			"70 674 l 64 674 64 674 64 668 c 64 596 l 64 590 64 590 70 590 c h S ", true},
+		{"a tick in a row", "0.5 w 340 642 m 343 639 l 349 647 l S ", true},
+	} {
+		doc := pagesOf(t, tc.drawing+labels)
+		p, _ := doc.Page(ctx, 1)
+		tables, err := p.Tables(ctx)
+		if err != nil || len(tables) != 1 || tables[0].Rows != 4 || tables[0].Cols != 3 {
+			t.Fatalf("%s: tables = %+v, %v", tc.name, tables, err)
+		}
+		if got := tables[0].Confidence >= 0.5; got != tc.table {
+			t.Errorf("%s: confidence %.2f", tc.name, tables[0].Confidence)
+		}
+		md, _ := doc.Markdown(ctx, MarkdownOptions{OmitPageMarkers: true})
+		if got := strings.Contains(md, shown); got != tc.table {
+			t.Errorf("%s: shown as a table: %v\n%s", tc.name, got, md)
+		}
+		// The text is there either way.
+		if !strings.Contains(md, "norm two") {
+			t.Errorf("%s: text was lost:\n%s", tc.name, md)
+		}
+	}
+}
+
+func TestLabelsOnAPictureAreNotATable(t *testing.T) {
+	// The labels of a chart's two axes, with the plot, a picture, between
+	// them; then the same text with the picture as a backdrop to it, and
+	// as the whole page.
+	labels := cells(660, 72, "Percent", 400, "Index") +
+		cells(640, 72, "30", 400, "120") +
+		cells(620, 72, "20", 400, "110") +
+		cells(600, 72, "10", 400, "100")
+	for _, tc := range []struct {
+		name, place string
+		invisible   bool
+		table       bool
+	}{
+		{"no picture", "", false, true},
+		{"a plot between the axes", "q 280 0 0 70 100 596 cm /Im Do Q ", false, false},
+		{"a backdrop for the table", "q 380 0 0 90 60 590 cm /Im Do Q ", false, true},
+		{"the page's background", "q 612 0 0 792 0 0 cm /Im Do Q ", false, true},
+		// A scan in two strips with its text layer: the pictures are the
+		// page, and the text over them is all there is to read.
+		{"a scan with hidden text", "q 612 0 0 300 0 492 cm /Im Do Q q 612 0 0 300 0 192 cm /Im Do Q ", true, true},
+	} {
+		b := pdftest.New()
+		img := b.AddStream("<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 >>", []byte{200})
+		res := fmt.Sprintf("<< /Font << /F1 %d 0 R >> /XObject << /Im %d 0 R >> >>", b.Add(helvetica), img)
+		text := labels
+		if tc.invisible {
+			text = "3 Tr " + labels
+		}
+		b.Pages(pdftest.PageSpec{Content: tc.place + text, Resources: res})
+		doc := openBytes(t, b.Bytes(), Options{})
+		p, _ := doc.Page(ctx, 1)
+		tables, err := p.Tables(ctx)
+		if err != nil || len(tables) != 1 || tables[0].Rows != 4 || tables[0].Cols != 2 {
+			t.Fatalf("%s: tables = %+v, %v", tc.name, tables, err)
+		}
+		if got := tables[0].Confidence >= 0.5; got != tc.table {
+			t.Errorf("%s: confidence %.2f", tc.name, tables[0].Confidence)
+		}
+	}
+}
+
 func TestTrimRows(t *testing.T) {
 	cell := func(row, col, span int, text string) TableCell {
 		return TableCell{Row: row, Col: col, RowSpan: 1, ColSpan: span, Text: text, Box: Box{float64(col), float64(row), float64(col + span), float64(row + 1)}}

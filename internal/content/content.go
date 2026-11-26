@@ -108,7 +108,16 @@ type Rule struct {
 	X0, Y0, X1, Y1 float64
 }
 
-// Sink receives what the interpreter finds. Either function may be nil.
+// Shape is a piece of drawing that is no ruling: the bounding box, in page
+// space, of a run of curves and slanting lines in a painted path. An arc,
+// an arrowhead and the line of a chart are shapes; the straight sides of a
+// box are rulings, and the rounded corners of one are four small shapes.
+// What a clipping path hides is left out.
+type Shape struct {
+	X0, Y0, X1, Y1 float64
+}
+
+// Sink receives what the interpreter finds. Any of the functions may be nil.
 type Sink struct {
 	// Glyph is called for every glyph shown. Returning false stops the
 	// interpretation. The Glyph is reused for the next call: copy it to
@@ -119,6 +128,9 @@ type Sink struct {
 	// page: a stroked horizontal or vertical segment, or a filled rectangle
 	// so thin that it is a line. These are the rulings of tables.
 	Rule func(Rule)
+	// Shape is called for every other piece of a painted path: curves and
+	// lines that slant. Where these are, there is a figure and not a table.
+	Shape func(Shape)
 }
 
 const (
@@ -182,6 +194,8 @@ type Interp struct {
 	path    box          // bounding box of the path under construction
 	segs    [][4]float64 // straight segments of that path, in page space
 	rects   [][4]float64 // rectangles of that path, as bounding boxes
+	shapes  []box        // runs of curves and slanting lines of that path
+	shape   box          // the run being drawn
 	start   [2]float64   // first point of the current subpath
 	cur     [2]float64   // current point
 	hasCur  bool
@@ -208,6 +222,7 @@ func (in *Interp) Run(ctx context.Context, data []byte, res pdfobj.Dict, ctm Mat
 	in.depth, in.ops, in.stopped = 0, 0, false
 	in.path, in.clipNow = box{}, false
 	in.segs, in.rects, in.hasCur = in.segs[:0], in.rects[:0], false
+	in.shapes, in.shape = in.shapes[:0], box{}
 	in.active = map[int]bool{}
 	in.run(data, &resources{dict: res})
 	return ctx.Err()
@@ -292,6 +307,7 @@ func (in *Interp) exec(op string, args []pdfobj.Object, p *pdfobj.Parser, res *r
 	// the points; curves stay inside the hull of their control points.
 	case "m":
 		x, y := in.pathPoint(num(args, n-2), num(args, n-1))
+		in.endShape()
 		in.start, in.cur, in.hasCur = [2]float64{x, y}, [2]float64{x, y}, true
 	case "l":
 		x, y := in.pathPoint(num(args, n-2), num(args, n-1))
@@ -301,14 +317,16 @@ func (in *Interp) exec(op string, args []pdfobj.Object, p *pdfobj.Parser, res *r
 			in.lineTo(in.start[0], in.start[1])
 		}
 	case "c":
+		in.curveFrom()
 		for i := 6; i >= 2; i -= 2 {
 			x, y := in.pathPoint(num(args, n-i), num(args, n-i+1))
-			in.cur = [2]float64{x, y} // a curve is no ruling: move without a segment
+			in.curveTo(x, y) // a curve is no ruling: move without a segment
 		}
 	case "v", "y":
+		in.curveFrom()
 		for i := 4; i >= 2; i -= 2 {
 			x, y := in.pathPoint(num(args, n-i), num(args, n-i+1))
-			in.cur = [2]float64{x, y}
+			in.curveTo(x, y)
 		}
 	case "re":
 		x, y, w, h := num(args, n-4), num(args, n-3), num(args, n-2), num(args, n-1)
@@ -322,6 +340,7 @@ func (in *Interp) exec(op string, args []pdfobj.Object, p *pdfobj.Parser, res *r
 				math.Max(math.Max(ax, bx), math.Max(cx, dx)), math.Max(math.Max(ay, by), math.Max(cy, dy)),
 			})
 		}
+		in.endShape()
 		in.start, in.cur, in.hasCur = [2]float64{ax, ay}, [2]float64{ax, ay}, true
 	case "W", "W*":
 		in.clipNow = true
@@ -334,16 +353,20 @@ func (in *Interp) exec(op string, args []pdfobj.Object, p *pdfobj.Parser, res *r
 				*c = in.path
 			}
 		}
-		if in.sink.Rule != nil && op != "n" {
+		if (in.sink.Rule != nil || in.sink.Shape != nil) && op != "n" {
 			if op == "s" || op == "b" || op == "b*" {
 				if in.hasCur {
 					in.lineTo(in.start[0], in.start[1]) // these close the path first
 				}
 			}
-			in.emitRules(op != "f" && op != "F" && op != "f*", op != "S" && op != "s")
+			if in.sink.Rule != nil {
+				in.emitRules(op != "f" && op != "F" && op != "f*", op != "S" && op != "s")
+			}
+			in.emitShapes()
 		}
 		in.path, in.clipNow = box{}, false
 		in.segs, in.rects, in.hasCur = in.segs[:0], in.rects[:0], false
+		in.shapes, in.shape = in.shapes[:0], box{}
 
 	// Text objects and text state.
 	case "BT":
@@ -538,7 +561,60 @@ func (in *Interp) lineTo(x, y float64) {
 	if in.hasCur && in.sink.Rule != nil && len(in.segs) < maxPathSegments {
 		in.segs = append(in.segs, [4]float64{in.cur[0], in.cur[1], x, y})
 	}
+	if in.hasCur && in.sink.Shape != nil {
+		// A line that runs across or down the page is a ruling, or too
+		// short to tell, and ends the run of what is not.
+		if math.Abs(x-in.cur[0]) <= ruleSlack || math.Abs(y-in.cur[1]) <= ruleSlack {
+			in.endShape()
+		} else if finite(in.cur[0], in.cur[1], x, y) {
+			in.shape.add(in.cur[0], in.cur[1])
+			in.shape.add(x, y)
+		}
+	}
 	in.cur, in.hasCur = [2]float64{x, y}, true
+}
+
+// curveFrom starts a curve at the current point, and curveTo moves to its
+// next control point or its end. A curve stays inside the hull of its
+// control points, so their bounding box holds it.
+func (in *Interp) curveFrom() {
+	if in.hasCur && in.sink.Shape != nil && finite(in.cur[0], in.cur[1]) {
+		in.shape.add(in.cur[0], in.cur[1])
+	}
+}
+
+func (in *Interp) curveTo(x, y float64) {
+	if in.sink.Shape != nil && finite(x, y) {
+		in.shape.add(x, y)
+	}
+	in.cur, in.hasCur = [2]float64{x, y}, true
+}
+
+// endShape closes the run of curves and slanting lines being drawn.
+func (in *Interp) endShape() {
+	if in.shape.set && len(in.shapes) < maxPathSegments {
+		in.shapes = append(in.shapes, in.shape)
+	}
+	in.shape = box{}
+}
+
+// emitShapes reports the runs of curves and slanting lines in the path
+// just painted, as far as the clipping path lets them show.
+func (in *Interp) emitShapes() {
+	in.endShape()
+	if in.sink.Shape == nil {
+		return
+	}
+	for _, b := range in.shapes {
+		if c := in.gs.clip; c.set {
+			b.x0, b.y0 = math.Max(b.x0, c.x0), math.Max(b.y0, c.y0)
+			b.x1, b.y1 = math.Min(b.x1, c.x1), math.Min(b.y1, c.y1)
+			if b.x1 < b.x0 || b.y1 < b.y0 {
+				continue
+			}
+		}
+		in.sink.Shape(Shape{b.x0, b.y0, b.x1, b.y1})
+	}
 }
 
 const (
@@ -898,6 +974,7 @@ func (in *Interp) xobject(o pdfobj.Object, parent *resources) {
 	in.stack = nil
 	in.path, in.clipNow = box{}, false
 	in.segs, in.rects, in.hasCur = in.segs[:0], in.rects[:0], false
+	in.shapes, in.shape = in.shapes[:0], box{}
 	in.gs.ctm = matrix.Mul(in.gs.ctm)
 	in.depth++
 	in.run(data, res)
