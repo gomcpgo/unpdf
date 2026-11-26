@@ -297,6 +297,48 @@ func TestTrimRows(t *testing.T) {
 	}
 }
 
+func TestCellContinuedOverThePage(t *testing.T) {
+	// A table of wrapped text ruled off row by row. Its second page
+	// repeats the header and starts with the rest of a cell from the first
+	// page, which has text in the second column only.
+	rule := func(y int) string { return fmt.Sprintf("0.5 w 66 %d m 500 %d l S ", y, y) }
+	first := rule(712) + cells(700, 72, "Category", 200, "Subcategories") + rule(694) +
+		cells(682, 72, "Govern", 200, "Policies and procedures are in place across the") +
+		cells(670, 200, "organisation, and those who carry them out know") + rule(664)
+	second := rule(712) + cells(700, 72, "Category", 200, "Subcategories") + rule(694) +
+		cells(682, 200, "them well and have been trained in them, which") +
+		cells(670, 200, "is checked every year by someone from outside") +
+		cells(658, 200, "the team.") + rule(652) +
+		cells(640, 72, "Map", 200, "The context is established and understood by") +
+		cells(628, 200, "all who work on the system.") + rule(622) +
+		cells(610, 72, "Measure", 200, "Risks are assessed with methods fit for them") +
+		cells(598, 200, "and are tracked over time.") + rule(592)
+	doc := pagesOf(t, first, second)
+	p, _ := doc.Page(ctx, 2)
+	tables, err := p.Tables(ctx)
+	if err != nil || len(tables) != 1 {
+		t.Fatalf("tables = %+v, %v", tables, err)
+	}
+	want := [][]string{{"Category", "Subcategories"},
+		{"", "them well and have been trained in them, which\nis checked every year by someone from outside\nthe team."},
+		{"Map", "The context is established and understood by\nall who work on the system."},
+		{"Measure", "Risks are assessed with methods fit for them\nand are tracked over time."}}
+	if got := tables[0].Grid(); !reflect.DeepEqual(got, want) || tables[0].Confidence < 0.5 {
+		t.Errorf("grid = %q, confidence %.2f", got, tables[0].Confidence)
+	}
+	// In Markdown the rest of the cell is a row of the table, under the
+	// header both pages have, and not a paragraph before it.
+	md, _ := doc.Markdown(ctx, MarkdownOptions{OmitPageMarkers: true})
+	wantMD := "| Category | Subcategories |\n| --- | --- |\n" +
+		"| Govern | Policies and procedures are in place across the organisation, and those who carry them out know |\n" +
+		"|  | them well and have been trained in them, which is checked every year by someone from outside the team. |\n" +
+		"| Map | The context is established and understood by all who work on the system. |\n" +
+		"| Measure | Risks are assessed with methods fit for them and are tracked over time. |\n"
+	if md != wantMD {
+		t.Errorf("Markdown:\n%s", md)
+	}
+}
+
 func TestControlCharactersAreNotText(t *testing.T) {
 	// A font that maps a glyph to a backspace, as one producer does for
 	// the glyph that pulls a row of dots back, and another to a tab.
