@@ -7,6 +7,7 @@ import (
 	"math"
 	"slices"
 	"strings"
+	"unicode"
 )
 
 // maxHeaderLines is the most lines of text the header of a table is looked
@@ -358,4 +359,297 @@ func headerBands(t *Table, split []bool) int {
 		}
 	}
 	return first
+}
+
+// ruledHeader returns how many rows at the top of a table found from rules
+// are its header, given, for each row, whether it is one of the rows of
+// figures that a band between two rules was split into. The evidence, from
+// the surest down: a row that numbers the columns; type set in bold; a
+// header ruled off over rows of figures that white space parts; and, where
+// every row is ruled off alike, the text of the rows.
+func ruledHeader(words []Word, t *Table, split []bool) int {
+	rows := topRows(t)
+	if n := numbered(t, rows); n > 0 {
+		return n
+	}
+	if n := boldRows(words, t, rows); n > 0 {
+		return n
+	}
+	if n := headerBands(t, split); n > 0 {
+		// A line of units under the headings, "(1,000 acres)" in each
+		// column, has no rule under it and falls in with the figures.
+		if n < len(split) && split[n] && n+1 < len(rows) && unitRow(rows[n]) && dataCells(rows[n+1]) {
+			n++
+		}
+		return n
+	}
+	return textHeader(t, rows)
+}
+
+// TextHeader returns how many rows at the top of a table read as its
+// header by the text of its cells alone: the rows down to a row that
+// numbers the columns, or down to the first row of figures. It is for a
+// table whose rules, type and tags say nothing about its header, and is 0
+// when the text says nothing either.
+func TextHeader(t *Table) int {
+	rows := topRows(t)
+	if n := numbered(t, rows); n > 0 {
+		return n
+	}
+	return textHeader(t, rows)
+}
+
+// bodyLook is how many rows under a header are looked at to see that they
+// are rows of figures.
+const bodyLook = 6
+
+// topRows returns the cells with text that start in each of the first rows
+// of a table, from the left: as many rows as a header and the look at what
+// is under it may take.
+func topRows(t *Table) [][]*Cell {
+	if t.Rows < 2 || t.Cols < 2 {
+		return nil
+	}
+	rows := make([][]*Cell, min(t.Rows, maxHeaderLines+1+bodyLook))
+	for i := range t.Cells {
+		if c := &t.Cells[i]; c.Row >= 0 && c.Row < len(rows) && c.Text != "" {
+			rows[c.Row] = append(rows[c.Row], c)
+		}
+	}
+	for _, r := range rows {
+		slices.SortStableFunc(r, func(a, b *Cell) int { return a.Col - b.Col })
+	}
+	return rows
+}
+
+// figure reports whether the text of a cell is a figure, and not a label
+// that holds one: "1,234", "12.5%", "(45)" and "$ 13,230" are figures, and
+// so is a currency sign in a cell of its own. "Q4", "FY24", "Under $15,000"
+// and "(1,000 acres)" are labels, and a year is as often a heading as not.
+func figure(s string) bool {
+	if isAmount(s) {
+		return true
+	}
+	digits, letters, lead := 0, 0, false
+	for _, r := range s {
+		switch {
+		case unicode.IsDigit(r):
+			digits++
+		case unicode.IsLetter(r):
+			lead = lead || digits == 0
+			letters++
+		}
+	}
+	return digits > 0 && letters <= 1 && !lead && !isYears(s)
+}
+
+// dataCells reports whether the cells of a row read as a row of data: a
+// third or more of them hold figures.
+func dataCells(row []*Cell) bool {
+	figures := 0
+	for _, c := range row {
+		if figure(c.Text) {
+			figures++
+		}
+	}
+	return len(row) > 0 && figures*3 >= len(row)
+}
+
+// columnNumber returns the number in a cell that numbers its column, as in
+// "(3)" or "[3]".
+func columnNumber(s string) (int, bool) {
+	s = strings.TrimSpace(s)
+	if len(s) < 3 || len(s) > 5 || !(s[0] == '(' && s[len(s)-1] == ')' || s[0] == '[' && s[len(s)-1] == ']') {
+		return 0, false
+	}
+	n := 0
+	for _, r := range s[1 : len(s)-1] {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n, n > 0
+}
+
+// numbered returns the number of header rows of a table that numbers its
+// columns under their headings, as statistical tables do: "(1)", "(2)",
+// "(3)", counting up from the left. That row is the last of the header. It
+// is 0 when the table has no such row.
+func numbered(t *Table, rows [][]*Cell) int {
+	for r := 1; r < len(rows) && r <= maxHeaderLines && r < t.Rows-1; r++ {
+		if len(rows[r]) < 2 {
+			continue
+		}
+		last, ok := 0, true
+		for i, c := range rows[r] {
+			n, is := columnNumber(c.Text)
+			if !is || (i > 0 && n != last+1) {
+				ok = false
+				break
+			}
+			last = n
+		}
+		if ok {
+			return r + 1
+		}
+	}
+	return 0
+}
+
+// unitRow reports whether a row is a line of units under the headings: it
+// has nothing in the first column, and what it has under the others is
+// words, with or without a figure among them, and no figure alone.
+func unitRow(row []*Cell) bool {
+	if len(row) < 2 || row[0].Col == 0 {
+		return false
+	}
+	for _, c := range row {
+		if figure(c.Text) || strings.IndexFunc(c.Text, unicode.IsLetter) < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// boldRows returns the number of header rows of a table whose first row is
+// set in bold and whose rows are not in the main. Where the rows under the
+// first are bold as well, they are header rows down to the first row of
+// figures: a row of totals may be bold too.
+func boldRows(words []Word, t *Table, rows [][]*Cell) int {
+	if headerRows(words, t) == 0 {
+		return 0
+	}
+	limit := min(len(rows), maxHeaderLines, t.Rows-1)
+	h := 1
+	for h < limit && !dataCells(rows[h]) {
+		bold := true
+		for _, c := range rows[h] {
+			for _, i := range c.Words {
+				bold = bold && words[i].Bold
+			}
+		}
+		if !bold {
+			break
+		}
+		h++
+	}
+	return max(1, headerEnd(t, rows, h))
+}
+
+// textHeader returns the number of rows at the top of a table down to its
+// first row of figures, when the rows that follow are rows of figures too
+// and what stands above them reads as the headings of the columns.
+func textHeader(t *Table, rows [][]*Cell) int {
+	first := 0
+	for first < len(rows) && first <= maxHeaderLines && !dataCells(rows[first]) {
+		first++
+	}
+	if first == 0 || first >= len(rows) || first > maxHeaderLines {
+		return 0
+	}
+	// The rows under it: those that hold more than a label are rows of
+	// figures, two in three or more.
+	looked, data := 0, 0
+	for r := first; r < min(len(rows), first+bodyLook); r++ {
+		if len(rows[r]) < 2 {
+			continue
+		}
+		looked++
+		if dataCells(rows[r]) {
+			data++
+		}
+	}
+	if data*3 < looked*2 {
+		return 0
+	}
+	h := headerEnd(t, rows, first)
+	if h == 0 {
+		return 0
+	}
+	// A row of words under the first, with text in the first column, may
+	// as well be the first row of data, one that holds no figure, as be
+	// the row of headings that has the first column's. It is the row of
+	// headings when the rows above it head groups of columns: each has a
+	// cell merged across columns, or leaves empty a column, other than the
+	// first, that a row under it fills.
+	for k := 1; k < h; k++ {
+		if len(rows[k]) == 0 || rows[k][0].Col != 0 {
+			continue
+		}
+		for r := 0; r < k; r++ {
+			covered := make([]bool, t.Cols)
+			groups := false
+			for _, c := range rows[r] {
+				groups = groups || c.ColSpan > 1
+				for col := max(c.Col, 0); col < min(c.Col+max(c.ColSpan, 1), t.Cols); col++ {
+					covered[col] = true
+				}
+			}
+			for under := r + 1; under < h && !groups; under++ {
+				for _, c := range rows[under] {
+					groups = groups || (c.Col > 0 && c.Col < t.Cols && !covered[c.Col])
+				}
+			}
+			if !groups {
+				h = k
+				break
+			}
+		}
+		break
+	}
+	// The headings must be headings of the columns: between them, the
+	// header rows have text over most of the columns the rows under them
+	// fill.
+	headed, filled := make([]bool, t.Cols), make([]bool, t.Cols)
+	for r, row := range rows {
+		for _, c := range row {
+			if c.ColSpan >= t.Cols {
+				continue // a title across the table heads no column
+			}
+			for col := max(c.Col, 0); col < min(c.Col+max(c.ColSpan, 1), t.Cols); col++ {
+				if r < h {
+					headed[col] = true
+				} else if c.ColSpan <= 1 {
+					filled[col] = true
+				}
+			}
+		}
+	}
+	body, over := 0, 0
+	for col := range filled {
+		if filled[col] {
+			body++
+			if headed[col] {
+				over++
+			}
+		}
+	}
+	if body == 0 || over*5 < body*3 {
+		return 0
+	}
+	return h
+}
+
+// headerEnd cuts back a header of h rows to the rows that are headings of
+// the columns. A row just above the rows of figures with text in its first
+// cell only names the rows that follow. And the first column has one
+// heading: a second row with text there is a row of the table, whose other
+// cells happen to hold no figure.
+func headerEnd(t *Table, rows [][]*Cell, h int) int {
+	h = min(h, len(rows), t.Rows-1)
+	for h > 0 && len(rows[h-1]) == 1 && rows[h-1][0].Col == 0 {
+		h--
+	}
+	labelled := false
+	for r := 0; r < h; r++ {
+		if len(rows[r]) == 0 || rows[r][0].Col != 0 || rows[r][0].ColSpan >= t.Cols {
+			continue // a title across the table is not the first column's
+		}
+		if labelled {
+			return r
+		}
+		labelled = true
+	}
+	return h
 }

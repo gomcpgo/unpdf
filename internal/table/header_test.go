@@ -237,15 +237,174 @@ func TestRuledHeaderBand(t *testing.T) {
 		t.Fatalf("two levels: %+v", tables)
 	}
 
-	// Where every row is ruled off, nothing says which are headings.
-	r := &page{}
-	r.grid([]float64{50, 150, 250, 350}, []float64{100, 120, 140, 160, 180})
-	r.text(114, 55, "Region", 155, "Second", 255, "Third")
-	r.text(134, 55, "North", 155, "1,204", 255, "1,318")
-	r.text(154, 55, "South", 155, "982", 255, "1,045")
-	r.text(174, 55, "West", 155, "611", 255, "702")
-	tables = Ruled(r.words, r.rules)
-	if len(tables) != 1 || tables[0].HeaderRows != 0 {
-		t.Errorf("a full grid: %+v", tables)
+}
+
+// ruledRows rules off every row of a grid of three columns and sets a row
+// of text in each: the first column's cell, then the other two.
+func ruledRows(rows ...[3]string) *page {
+	p := &page{}
+	ys := []float64{100}
+	for i, row := range rows {
+		y := 100 + 20*float64(i)
+		ys = append(ys, y+20)
+		p.text(y+14, 55, row[0], 155, row[1], 255, row[2])
+	}
+	p.grid([]float64{50, 150, 250, 350}, ys)
+	return p
+}
+
+func TestRuledHeaderWhereEveryRowIsRuled(t *testing.T) {
+	// Nothing drawn sets the header apart. The text does: words over rows
+	// of figures.
+	for _, tc := range []struct {
+		name string
+		rows [][3]string
+		want int
+	}{
+		{"words over figures", [][3]string{{"Region", "Second", "Third"},
+			{"North", "1,204", "1,318"}, {"South", "982", "1,045"}, {"West", "611", "702"}}, 1},
+		// A row that numbers the columns is the last of the header, and
+		// headings that hold amounts are headings all the same.
+		{"numbered columns", [][3]string{{"Item", "Under $15,000", "$15,000 or more"}, {"", "(1)", "(2)"},
+			{"Returns", "760,088", "495,215"}, {"Amount", "65,622", "786,764"}}, 2},
+		// Labels of periods are not figures, and years are headings.
+		{"years and quarters", [][3]string{{"Series", "2024", ""}, {"", "Q3", "Q4"},
+			{"Goods", "5.6", "6.2"}, {"Services", "2.8", "3.0"}}, 2},
+		// A row that names the rows under it is no heading.
+		{"a group of rows", [][3]string{{"Item", "Returns", "Amount"}, {"Income:", "", ""},
+			{"Wages", "1,204", "1,318"}, {"Interest", "982", "1,045"}}, 1},
+		// A table set on its side: the first row of data holds words.
+		// The first column has one heading, and here not even that.
+		{"rows of words first", [][3]string{{"", "Alpha", "Beta"}, {"Kind", "wood", "metal"},
+			{"Count", "12", "15"}, {"Cost", "7", "9"}}, 1},
+		{"two rows of words, each with a label", [][3]string{{"Name", "Alpha", "Beta"}, {"Kind", "wood", "metal"},
+			{"Count", "12", "15"}, {"Cost", "7", "9"}}, 1},
+		{"no figures", [][3]string{{"Name", "Kind", "Place"}, {"Alpha", "wood", "north"},
+			{"Beta", "metal", "south"}}, 0},
+		{"figures from the top", [][3]string{{"1", "1,204", "1,318"}, {"2", "982", "1,045"},
+			{"3", "611", "702"}}, 0},
+	} {
+		p := ruledRows(tc.rows...)
+		tables := Ruled(p.words, p.rules)
+		if len(tables) != 1 || tables[0].HeaderRows != tc.want {
+			t.Errorf("%s: %d header rows, want %d (%d tables)", tc.name, tables[0].HeaderRows, tc.want, len(tables))
+		}
+	}
+}
+
+func TestRuledHeaderOfGroupsWhereEveryRowIsRuled(t *testing.T) {
+	// The first row's heading is merged across two columns, and the row
+	// under it has the first column's heading: two levels.
+	p := &page{}
+	for _, y := range []float64{100, 120, 140, 160, 180, 200} {
+		p.h(y, 50, 350)
+	}
+	for _, x := range []float64{50, 150, 350} {
+		p.v(x, 100, 200)
+	}
+	p.v(250, 120, 200)
+	p.text(114, 155, "Cases in the year")
+	p.text(134, 55, "State", 155, "Received", 255, "Closed")
+	p.text(154, 55, "Alabama", 155, "2,120", 255, "2,020")
+	p.text(174, 55, "Alaska", 155, "26", 255, "31")
+	p.text(194, 55, "Arizona", 155, "629", 255, "562")
+	tables := Ruled(p.words, p.rules)
+	if len(tables) != 1 || tables[0].Rows != 5 || tables[0].HeaderRows != 2 {
+		t.Fatalf("%+v", tables)
+	}
+}
+
+func TestRuledHeaderInBold(t *testing.T) {
+	// Three levels of headings in bold, and a row of totals in bold under
+	// them: the header ends where the figures start.
+	p := ruledRows([3]string{"Series", "Share", "Change"}, [3]string{"", "2024", "2024"}, [3]string{"", "Q3", "Q4"},
+		[3]string{"Total", "100.0", "2.4"})
+	for i := range p.words {
+		p.words[i].Bold = true
+	}
+	rest := [][3]string{{"Goods", "21.4", "6.2"}, {"Durable", "7.5", "12.4"}, {"Other", "13.9", "3.1"}, {"Services", "46.8", "3.0"}}
+	for i, row := range rest {
+		p.text(194+20*float64(i), 55, row[0], 155, row[1], 255, row[2])
+	}
+	p.rules = nil
+	p.grid([]float64{50, 150, 250, 350}, []float64{100, 120, 140, 160, 180, 200, 220, 240, 260})
+	tables := Ruled(p.words, p.rules)
+	if len(tables) != 1 || tables[0].Rows != 8 || tables[0].HeaderRows != 3 {
+		t.Fatalf("%d tables, %d rows, %d header rows", len(tables), tables[0].Rows, tables[0].HeaderRows)
+	}
+}
+
+func TestRuledHeaderWithALineOfUnits(t *testing.T) {
+	// Two levels of headings, each ruled off, and under them a line of
+	// units with no rule of its own: it stands in the band of the figures
+	// and is the third header row.
+	p := &page{}
+	p.h(100, 40, 350)
+	p.h(120, 150, 350)
+	p.h(140, 40, 350)
+	p.h(260, 40, 350)
+	for _, x := range []float64{150, 250, 350} {
+		p.v(x, 120, 260)
+	}
+	p.v(150, 100, 120)
+	p.v(350, 100, 120)
+	p.text(114, 155, "Area planted")
+	p.text(134, 45, "State", 155, "2023", 255, "2024")
+	p.text(154, 155, "(1,000 acres)", 255, "(1,000 acres)")
+	rows := [][3]string{{"Alabama", "2,120", "2,020"}, {"Alaska", "26", "31"}, {"Arizona", "629", "562"}, {"Arkansas", "6,990", "7,053"}, {"Colorado", "5,651", "5,933"}}
+	for i, row := range rows {
+		p.text(172+18*float64(i), 45, row[0], 155, row[1], 255, row[2])
+	}
+	tables := Ruled(p.words, p.rules)
+	if len(tables) != 1 {
+		t.Fatalf("%d tables", len(tables))
+	}
+	tb := tables[0]
+	if got := flat(tb); tb.Rows != 8 || tb.HeaderRows != 3 || strings.Join(got[2], "|") != "|(1,000 acres)|(1,000 acres)" {
+		t.Errorf("%d rows, %d header rows: %q", tb.Rows, tb.HeaderRows, got)
+	}
+	// A first row of the band that has its label is a row of figures.
+	q := &page{}
+	q.rules = p.rules
+	q.text(114, 155, "Area planted")
+	q.text(134, 45, "State", 155, "2023", 255, "2024")
+	q.text(154, 45, "Total", 155, "(D)", 255, "(D)")
+	for i, row := range rows {
+		q.text(172+18*float64(i), 45, row[0], 155, row[1], 255, row[2])
+	}
+	if tables = Ruled(q.words, q.rules); len(tables) != 1 || tables[0].HeaderRows != 2 {
+		t.Errorf("a row with a label: %+v", tables)
+	}
+}
+
+func TestTextHeader(t *testing.T) {
+	cells := func(rows ...[]string) *Table {
+		tb := &Table{Rows: len(rows), Cols: len(rows[0])}
+		for r, row := range rows {
+			for c, text := range row {
+				tb.Cells = append(tb.Cells, Cell{Row: r, Col: c, RowSpan: 1, ColSpan: 1, Text: text})
+			}
+		}
+		return tb
+	}
+	for _, tc := range []struct {
+		name string
+		tb   *Table
+		want int
+	}{
+		{"numbered", cells([]string{"Type of case", "Cases received", "Cases closed"}, []string{"", "(1)", "(2)"},
+			[]string{"Total", "60,933", "52,997"}, []string{"Other", "4,772", "4,741"}), 2},
+		// Figures in brackets that do not count up are figures.
+		{"numbers that do not count up", cells([]string{"Type", "First", "Second"}, []string{"", "(4)", "(2)"},
+			[]string{"Total", "60,933", "52,997"}, []string{"Other", "4,772", "4,741"}), 1},
+		// The heading of a group, with no word on the columns it covers,
+		// leaves the column beside it empty.
+		{"a group and its columns", cells([]string{"", "Multiply by:", ""}, []string{"", "Feet", "Yards"},
+			[]string{"1 inch =", "0.083 333", "0.027 777"}, []string{"1 foot =", "1", "0.333 333"}), 2},
+		{"one row", cells([]string{"Total", "60,933", "52,997"}), 0},
+	} {
+		if got := TextHeader(tc.tb); got != tc.want {
+			t.Errorf("%s: %d header rows, want %d", tc.name, got, tc.want)
+		}
 	}
 }

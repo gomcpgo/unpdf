@@ -551,6 +551,19 @@ func trimRows(t *Table) []TableCell {
 	return cut
 }
 
+// textHeader returns the number of header rows that the text of a table's
+// cells shows, for a table whose tags name none.
+func textHeader(t *Table) int {
+	const top = 16 // more rows than a header and the look under it take
+	g := table.Table{Rows: t.Rows, Cols: t.Cols}
+	for _, c := range t.Cells {
+		if c.Row < top {
+			g.Cells = append(g.Cells, table.Cell{Row: c.Row, Col: c.Col, RowSpan: c.RowSpan, ColSpan: c.ColSpan, Text: c.Text})
+		}
+	}
+	return table.TextHeader(&g)
+}
+
 // mirror renumbers the columns of a table on a right-to-left page, where
 // the first column is the rightmost.
 func mirror(t *table.Table) {

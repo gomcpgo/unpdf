@@ -595,6 +595,11 @@ func (p *Page) taggedTables(laid []layout.Block) []Table {
 		if !rtl {
 			settleColumns(&table)
 		}
+		if table.HeaderRows == 0 {
+			// The tags name no header row, or named only the title that
+			// was just taken off: the text of the rows may still show one.
+			table.HeaderRows = textHeader(&table)
+		}
 		switch {
 		case table.Cols < 2:
 			continue // one column: a table used to set out a page
