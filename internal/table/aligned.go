@@ -27,6 +27,9 @@ const (
 	rowPitch = 3.0
 	// maxRows is the most lines a table without rules may have.
 	maxRows = 1000
+	// maxLead is the most lines with no gap that may follow the first line
+	// of a table before a second line shows its columns.
+	maxLead = 40
 )
 
 // Aligned finds tables that have no grid of ruling lines: runs of
@@ -69,12 +72,18 @@ func Aligned(words []Word, lines []Line, rules []Rule) ([]Table, []int) {
 		// of a cell that runs to several, which keeps within one column.
 		// A line of prose does not: it runs across the columns, and ends
 		// the table. Until two lines have shown where the columns are,
-		// a line or two with no gap is let through.
+		// a line or two with no gap is let through, and as many lines of
+		// running text as keep under one cell of the first line: the rest
+		// of a cell that began on the page before, under the header the
+		// page repeats.
 		end := start + 1
 		tab := []int{start}
 		var columns [][2]float64
 		sepsFor := 0
 		x0, x1, size := extent(words, lines[start:end])
+		first := cellStarts(words, lines[start])
+		loose := 0     // lines let through that keep under no one cell
+		prose := false // the line before was running text under a cell
 		for end < len(lines) && end-start < maxRows {
 			prev, cur := lines[end-1], lines[end]
 			sz := lineSize(words, cur)
@@ -87,7 +96,15 @@ func Aligned(words []Word, lines []Line, rules []Rule) ([]Table, []int) {
 				continue
 			}
 			if len(tab) < 2 {
-				if end-tab[0] >= 3 {
+				// Running text has several words to a line, but for the
+				// last line of a paragraph.
+				prose = under(cur, first, sz) && (len(cur.Words) >= 3 || prose)
+				if !prose {
+					if loose++; loose > 2 {
+						break
+					}
+				}
+				if end-tab[0] > maxLead {
 					break
 				}
 				end++
@@ -129,6 +146,38 @@ func Aligned(words []Word, lines []Line, rules []Rule) ([]Table, []int) {
 	return tables, member
 }
 
+// cellStarts returns where each cell of a line begins: the left edge of
+// the line and of every word that follows a gap wide enough to part cells.
+func cellStarts(words []Word, l Line) []float64 {
+	var starts []float64
+	for j, i := range l.Words {
+		w := words[i]
+		if j == 0 {
+			starts = append(starts, w.X0)
+			continue
+		}
+		if a := words[l.Words[j-1]]; w.X0-a.X1 > cellGap*math.Max(a.Size, w.Size) {
+			starts = append(starts, w.X0)
+		}
+	}
+	return starts
+}
+
+// under reports whether a line keeps under one cell of the line whose
+// cells begin at starts: it begins where that cell does, or further in,
+// and ends before the next cell begins.
+func under(l Line, starts []float64, size float64) bool {
+	for k, x := range starts {
+		if l.X0 < x-0.5*size {
+			break
+		}
+		if k+1 == len(starts) || l.X1 < starts[k+1]-0.5*size {
+			return true
+		}
+	}
+	return false
+}
+
 func lineSize(words []Word, l Line) float64 {
 	size := 0.0
 	for _, i := range l.Words {
@@ -158,20 +207,56 @@ func columnExtents(words []Word, lines []Line, seps []float64) [][2]float64 {
 }
 
 // bridges reports whether a line with no wide gap in it runs across
-// columns: it has words where the text of two of them lies. A label too
-// long for its column runs into the gap beside it, but not into the next
-// column's text.
+// columns: it has words where the text of two of them lies, and reads on
+// from the one into the other. A label too long for its column runs into
+// the gap beside it, but not into the next column's text. And a line that
+// has text in two columns, a long label beside the start of the next cell,
+// keeps them apart all the same: the space where the next column begins is
+// wider than a space between words, and wider than its other spaces.
 func bridges(words []Word, l Line, columns [][2]float64) bool {
-	touched := 0
-	for _, col := range columns {
+	last := -1 // the last column the line has words in
+	for c, col := range columns {
+		touches := false
 		for _, i := range l.Words {
 			if w := words[i]; w.X0 < col[1] && w.X1 > col[0] {
-				touched++
+				touches = true
 				break
 			}
 		}
+		if !touches {
+			continue
+		}
+		if last >= 0 && !parts(words, l, col[0]) {
+			return true
+		}
+		last = c
 	}
-	return touched >= 2
+	return false
+}
+
+// parts reports whether a line breaks off where a column begins, at x: the
+// space there is no space between two words of a phrase.
+func parts(words []Word, l Line, x float64) bool {
+	at, widest := -1.0, 0.0 // the space at x, and the widest of the others
+	for j := 1; j < len(l.Words); j++ {
+		a, b := words[l.Words[j-1]], words[l.Words[j]]
+		gap := b.X0 - a.X1
+		size := math.Max(a.Size, b.Size)
+		switch {
+		case a.X1 > x+0.5*size || b.X0 < x-0.5*size:
+			// A space within a column. One wide enough to part cells is
+			// the gap before another column, not a space of the phrase.
+			if gap <= cellGap*size {
+				widest = math.Max(widest, gap)
+			}
+		case at < 0:
+			at = gap
+			if gap < 0.6*size {
+				return false
+			}
+		}
+	}
+	return at >= 0 && at >= 1.5*widest
 }
 
 // extent returns the horizontal extent of some lines and their largest
@@ -293,8 +378,9 @@ func align(words []Word, lines []Line, hs []hline) (Table, bool) {
 	// Rows. Where the cells hold short entries, every line is a row. Where
 	// a column holds prose that wraps, a row takes several lines, and
 	// something other than the lines has to say where rows end: rules
-	// between them, or wider gaps. Without either the lines cannot be made
-	// into rows with any confidence.
+	// between them, or wider gaps, or failing both the text itself, by how
+	// the first column starts its entries. Without any of these the lines
+	// cannot be made into rows with any confidence.
 	y0, y1 := rows[0].y0, rows[len(rows)-1].y1
 	var between []float64 // rules that cross the table
 	bounding := 0         // rules across its width, inside it or at its edges
@@ -318,7 +404,11 @@ func align(words []Word, lines []Line, hs []hline) (Table, bool) {
 		case len(byGaps) >= 2 && len(byGaps) < len(rows):
 			rows = byGaps
 		default:
-			unsure = true
+			if byText, ok := rowsByText(words, rows, cols, size); ok {
+				rows = byText
+			} else {
+				unsure = true
+			}
 		}
 	} else {
 		rows = mergeContinuations(words, rows, cols, size)
@@ -588,6 +678,149 @@ func rowsByGaps(lines []row, size float64) []row {
 	return out
 }
 
+// rowsByText makes lines into rows where a column holds text that wraps
+// and neither rules nor wider gaps mark the rows: by what the lines say.
+// It reports false when they do not say enough.
+//
+// Three cases, tried in turn:
+//
+//   - Most lines carry figures beside the first column, in columns that
+//     hold little else. Then the lines are rows of figures whose labels
+//     happen to be wordy, and nothing wraps but a label here and there.
+//   - The first column has an entry on nearly every line, each beginning
+//     with a capital or a figure. Then every line is a row here too:
+//     entries of a length, one under the other, look like text that fills
+//     its column.
+//   - Otherwise a row starts where the first column starts an entry: it
+//     has text that begins with a capital or a figure, and does not run on
+//     from a full line just above. The lines between two such starts are
+//     one row, whichever columns they have text in. This is believed only
+//     when the first column shows the pattern of a table: its entries are
+//     shorter than the rows, so that most of them start after a gap.
+//
+// A script with no capitals gives none of this, and its tables stay as
+// lines.
+func rowsByText(words []Word, lines []row, cols int, size float64) ([]row, bool) {
+	if len(lines) < 2 || cols < 2 {
+		return nil, false
+	}
+	figured, first, high := 0, 0, 0
+	widest := 0.0 // the widest entry of the first column
+	extent := func(idx []int) (x0, x1 float64) {
+		x0, x1 = math.Inf(1), math.Inf(-1)
+		for _, i := range idx {
+			x0, x1 = math.Min(x0, words[i].X0), math.Max(x1, words[i].X1)
+		}
+		return x0, x1
+	}
+	// leading returns the leftmost word of a cell.
+	leading := func(idx []int) Word {
+		w := words[idx[0]]
+		for _, i := range idx[1:] {
+			if words[i].X0 < w.X0 {
+				w = words[i]
+			}
+		}
+		return w
+	}
+	// startsHigh reports whether a cell begins with a capital or a figure,
+	// after any bracket, quotation mark or bullet.
+	startsHigh := func(idx []int) bool {
+		for _, r := range leading(idx).Text {
+			if unicode.IsLetter(r) || unicode.IsDigit(r) {
+				return unicode.IsUpper(r) || unicode.IsDigit(r)
+			}
+		}
+		return false
+	}
+	filled, numeric := make([]int, cols), make([]int, cols)
+	for _, l := range lines {
+		figures := false
+		for c := 1; c < cols; c++ {
+			if len(l.cells[c]) == 0 {
+				continue
+			}
+			filled[c]++
+			if isNumeric(cellText(words, l.cells[c])) {
+				numeric[c]++
+				figures = true
+			}
+		}
+		if figures {
+			figured++
+		}
+		if len(l.cells[0]) == 0 {
+			continue
+		}
+		first++
+		if startsHigh(l.cells[0]) {
+			high++
+		}
+		x0, x1 := extent(l.cells[0])
+		widest = math.Max(widest, x1-x0)
+	}
+	columnsOfFigures := 0
+	for c := 1; c < cols; c++ {
+		if filled[c] >= 2 && numeric[c]*10 >= filled[c]*6 {
+			columnsOfFigures++
+		}
+	}
+	rowsOfFigures := figured*10 >= len(lines)*7 && columnsOfFigures >= min(2, cols-1)
+	if rowsOfFigures || (first*5 >= len(lines)*4 && high*10 >= first*9) {
+		return mergeContinuations(words, lines, cols, size), true
+	}
+
+	// Where the first column starts an entry.
+	var starts []int
+	gapped := 0  // starts that follow a gap in the first column
+	before := -1 // the line before with text in the first column
+	for i, l := range lines {
+		if len(l.cells[0]) == 0 {
+			continue
+		}
+		gap := before < 0 || l.y0-lines[before].y1 > 0.6*size
+		start := startsHigh(l.cells[0])
+		if start && !gap {
+			// Under a full line, a capital may be mid-sentence: the line
+			// above had no room for this line's first word.
+			x0, x1 := extent(lines[before].cells[0])
+			w := leading(l.cells[0])
+			start = (x1-x0)+0.25*size+(w.X1-w.X0) <= widest
+		}
+		if start {
+			starts = append(starts, i)
+			if gap && before >= 0 {
+				gapped++
+			}
+		}
+		before = i
+	}
+	if len(starts) < 2 || gapped*2 < len(starts)-1 {
+		return nil, false
+	}
+	if starts[0] != 0 {
+		// Lines above the first entry: the rest of a row that began on the
+		// page before.
+		starts = append([]int{0}, starts...)
+	}
+	if len(starts) == len(lines) {
+		return nil, false // every line a row: no wrapping to speak of
+	}
+	out := make([]row, 0, len(starts))
+	for k, from := range starts {
+		to := len(lines)
+		if k+1 < len(starts) {
+			to = starts[k+1]
+		}
+		r := row{cells: make([][]int, cols), y0: lines[from].y0, y1: lines[from].y1}
+		for _, l := range lines[from:to] {
+			r.absorb(l)
+		}
+		out = append(out, r)
+	}
+	return out, true
+}
+
 // mergeContinuations joins a line to the row it belongs to when it is only
 // part of one: the second line of a row's cells, which leaves the first
 // column empty and sits tight under the row, or the first line of a label
@@ -673,6 +906,9 @@ func contentsLike(t *Table) bool {
 			last = n
 		}
 	}
+	if leaders(t)*2 >= t.Rows {
+		return true
+	}
 	if pages*5 < t.Rows*4 || rising*10 < pairs*9 {
 		return false
 	}
@@ -683,6 +919,33 @@ func contentsLike(t *Table) bool {
 		}
 	}
 	return true
+}
+
+// leaders counts the rows that end as the lines of a table of contents do:
+// a row of dots that leads to a page number, in one cell with the title.
+func leaders(t *Table) int {
+	last := make([]string, t.Rows) // the last cell with text in each row
+	for _, c := range t.Cells {
+		if c.Text != "" && c.Row >= 0 && c.Row < t.Rows {
+			last[c.Row] = c.Text
+		}
+	}
+	n := 0
+	for _, text := range last {
+		for _, line := range strings.Split(text, "\n") {
+			line = strings.TrimSpace(line)
+			cut := strings.LastIndex(line, "....")
+			if cut < 0 {
+				continue
+			}
+			page := strings.TrimLeft(line[cut:], ". ")
+			if page != "" && len(page) <= 8 && !strings.ContainsRune(page, ' ') && strings.ContainsAny(page, "0123456789ivxlcIVXLC") {
+				n++
+				break
+			}
+		}
+	}
+	return n
 }
 
 // isPageNumber reports a short number in digits or roman numerals.
