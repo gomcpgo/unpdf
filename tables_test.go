@@ -385,6 +385,37 @@ func TestHeaderOfSeveralLinesInMarkdown(t *testing.T) {
 	}
 }
 
+func TestGroupHeadingInMarkdown(t *testing.T) {
+	// The heading of the three columns of figures stands on a line of its
+	// own above the years, with a rule under it over those columns. It is
+	// a header row of the table, merged across them, and Markdown says it
+	// over each. It is not also a paragraph before the table.
+	doc := pagesOf(t, fmt.Sprintf(wrapped, 760)+
+		cells(700, 300, "Year ended December 31,")+"0.5 w 250 696 m 480 696 l S "+
+		cells(684, 250, "2023", 350, "2022", 450, "2021")+
+		cells(670, 72, "Revenue", 250, "97,147", 350, "21,998", 450, "90,949")+
+		cells(656, 72, "Costs", 250, "61,020", 350, "18,410", 450, "70,244")+
+		cells(642, 72, "Taxes", 250, "8,300", 350, "1,150", 450, "5,906"))
+	p, _ := doc.Page(ctx, 1)
+	tables, err := p.Tables(ctx)
+	if err != nil || len(tables) != 1 {
+		t.Fatalf("tables = %+v, %v", tables, err)
+	}
+	tb := tables[0]
+	if tb.Rows != 5 || tb.Cols != 4 || tb.HeaderRows != 2 || tb.Cells[1].Text != "Year ended December 31," || tb.Cells[1].ColSpan != 3 {
+		t.Errorf("table: %d x %d, %d header rows, cells %+v", tb.Rows, tb.Cols, tb.HeaderRows, tb.Cells[:3])
+	}
+	if got, want := tb.Grid()[0], []string{"", "Year ended December 31,", "", ""}; !reflect.DeepEqual(got, want) {
+		t.Errorf("grid = %q", got)
+	}
+	want := "|  | Year ended December 31, / 2023 | Year ended December 31, / 2022 | Year ended December 31, / 2021 |\n| --- | --- | --- | --- |\n" +
+		"| Revenue | 97,147 | 21,998 | 90,949 |\n| Costs | 61,020 | 18,410 | 70,244 |\n| Taxes | 8,300 | 1,150 | 5,906 |\n"
+	md, _ := doc.Markdown(ctx, MarkdownOptions{OmitPageMarkers: true})
+	if !strings.HasSuffix(md, "an address.\n\n"+want) {
+		t.Errorf("Markdown:\n%s", md)
+	}
+}
+
 func TestCleanCell(t *testing.T) {
 	for in, want := range map[string]string{
 		"Alabama ............................": "Alabama",

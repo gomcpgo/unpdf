@@ -618,7 +618,7 @@ func FuzzTables(f *testing.F) {
 			switch kind % 4 {
 			case 0:
 				x, y, w := num(), num(), num()
-				words = append(words, Word{Text: []string{"12", "word", "$", "3.5%", "iv", "a longer cell"}[int(kind/4)%6], X0: x, X1: x + w/16, Y0: y - 8, Y1: y + 2, Size: 10})
+				words = append(words, Word{Text: []string{"12", "word", "$", "3.5%", "iv", "a longer cell", "2023", "(1)"}[int(kind/4)%8], X0: x, X1: x + w/16, Y0: y - 8, Y1: y + 2, Size: 10})
 			case 1:
 				rules = append(rules, Rule{num(), num(), num(), num()})
 			case 2:
@@ -644,9 +644,23 @@ func FuzzTables(f *testing.F) {
 				if tb.Rows < 1 || tb.Cols < 1 || tb.Confidence < 0 || tb.Confidence > 1 || math.IsNaN(tb.Confidence) {
 					t.Fatalf("table %d x %d, confidence %v", tb.Rows, tb.Cols, tb.Confidence)
 				}
+				if tb.HeaderRows < 0 || tb.HeaderRows > tb.Rows {
+					t.Fatalf("%d header rows of %d", tb.HeaderRows, tb.Rows)
+				}
+				// A merged cell is there once: no place is in two cells.
+				taken := map[[2]int]bool{}
 				for _, c := range tb.Cells {
 					if c.Row < 0 || c.Col < 0 || c.Row+c.RowSpan > tb.Rows || c.Col+c.ColSpan > tb.Cols || c.RowSpan < 1 || c.ColSpan < 1 {
 						t.Fatalf("cell %+v outside a table of %d x %d", c, tb.Rows, tb.Cols)
+					}
+					if tb.Method != "alignment" {
+						continue
+					}
+					for col := c.Col; col < c.Col+c.ColSpan; col++ {
+						if taken[[2]int{c.Row, col}] {
+							t.Fatalf("two cells at row %d, column %d", c.Row, col)
+						}
+						taken[[2]int{c.Row, col}] = true
 					}
 				}
 			}

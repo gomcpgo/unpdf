@@ -480,3 +480,149 @@ func TestTextHeader(t *testing.T) {
 		}
 	}
 }
+
+// cellAt returns the cell that starts at a row and column.
+func cellAt(t Table, row, col int) Cell {
+	for _, c := range t.Cells {
+		if c.Row == row && c.Col == col {
+			return c
+		}
+	}
+	return Cell{}
+}
+
+func TestGroupHeadingIsMergedAcrossItsColumns(t *testing.T) {
+	body := func(p *page, y float64) {
+		p.text(y, 50, "October", 150, "1,815", 250, "522", 350, "900", 450, "410")
+		p.text(y+14, 50, "November", 150, "2,204", 250, "531", 350, "850", 450, "395")
+		p.text(y+28, 50, "December", 150, "1,960", 250, "540", 350, "800", 450, "380")
+	}
+	// The heading of three columns is centred over them, so its words
+	// stand in the middle one. The rule under it shows how far it reaches:
+	// it is one cell across the three, in the first.
+	p := &page{}
+	p.text(110, 50, "Fiscal", 230, "Shares in the year", 450, "Shares")
+	p.h(114, 150, 395)
+	p.text(124, 50, "period", 150, "Bought", 250, "Sold", 350, "Held", 450, "left")
+	body(p, 140)
+	tables, _ := Aligned(p.words, p.lines, p.rules)
+	if len(tables) != 1 {
+		t.Fatalf("%d tables", len(tables))
+	}
+	tb := tables[0]
+	want := [][]string{{"", "Shares in the year", "", "", ""}, {"Fiscal period", "Bought", "Sold", "Held", "Shares left"}}
+	if got := flat(tb); tb.HeaderRows != 2 || !same(got[:2], want) || cellAt(tb, 0, 1).ColSpan != 3 || cellAt(tb, 0, 2).Text != "" {
+		t.Errorf("under a rule: %d header rows, span %d: %q", tb.HeaderRows, cellAt(tb, 0, 1).ColSpan, got[:2])
+	}
+	// A merged cell is there once, and the cells of the rows are whole.
+	if n := len(tb.Cells); n != 5*5-2 {
+		t.Errorf("%d cells", n)
+	}
+
+	// One heading over two columns of years, and nothing else over them:
+	// the group's heading, though it fits over the first year and no rule
+	// sets it apart from the years.
+	q := &page{}
+	q.text(96, 150, "Losses to December 31,", 400, "Open")
+	q.text(110, 50, "Accident", 400, "claims")
+	q.text(124, 50, "year", 200, "2022", 300, "2023", 400, "(number)")
+	q.h(128, 50, 450)
+	q.text(140, 50, "2021", 190, "14,138", 290, "13,699", 400, "9,161")
+	q.text(154, 50, "2022", 190, "12,273", 290, "12,005", 400, "7,295")
+	q.text(168, 50, "2023", 190, "11,567", 290, "11,340", 400, "6,810")
+	tables, _ = Aligned(q.words, q.lines, q.rules)
+	if len(tables) != 1 {
+		t.Fatalf("%d tables", len(tables))
+	}
+	tb = tables[0]
+	want = [][]string{{"", "Losses to December 31,", "", ""}, {"Accident year", "2022", "2023", "Open claims (number)"}}
+	if got := flat(tb); tb.HeaderRows != 2 || !same(got[:2], want) || cellAt(tb, 0, 1).ColSpan != 2 {
+		t.Errorf("over years: %d header rows, span %d: %q", tb.HeaderRows, cellAt(tb, 0, 1).ColSpan, got[:2])
+	}
+
+	// Each year with a heading of its own: no group.
+	r := &page{}
+	r.text(110, 150, "September 30,", 290, "December 31,", 400, "Open")
+	r.text(124, 50, "Year", 150, "2023", 290, "2022", 400, "claims")
+	r.h(128, 50, 450)
+	r.text(140, 50, "2021", 150, "14,138", 290, "13,699", 400, "9,161")
+	r.text(154, 50, "2022", 150, "12,273", 290, "12,005", 400, "7,295")
+	r.text(168, 50, "2023", 150, "11,567", 290, "11,340", 400, "6,810")
+	tables, _ = Aligned(r.words, r.lines, r.rules)
+	if len(tables) != 1 {
+		t.Fatalf("%d tables", len(tables))
+	}
+	tb = tables[0]
+	want = [][]string{{"Year", "September 30, 2023", "December 31, 2022", "Open claims"}}
+	if got := flat(tb); tb.HeaderRows != 1 || !same(got[:1], want) || cellAt(tb, 0, 1).ColSpan != 1 {
+		t.Errorf("a heading for each year: %d header rows: %q", tb.HeaderRows, got[:2])
+	}
+}
+
+func TestHeaderLinesAboveTheTable(t *testing.T) {
+	// A table starts at the first line that shows its columns. The lines
+	// of its header above that one hold one thing each.
+	body := func(p *page, y float64) {
+		p.text(y, 50, "Revenue", 250, "97,147", 350, "21,998", 450, "90,949")
+		p.text(y+14, 50, "Costs", 250, "61,020", 350, "18,410", 450, "70,244")
+		p.text(y+28, 50, "Taxes", 250, "8,300", 350, "1,150", 450, "5,906")
+	}
+	// The heading of a group of columns, ruled off over them.
+	p := &page{}
+	p.text(96, 300, "Year ended December 31,")
+	p.h(100, 250, 480)
+	p.text(110, 250, "2023", 350, "2022", 450, "2021")
+	body(p, 124)
+	tables, member := Aligned(p.words, p.lines, p.rules)
+	if len(tables) != 1 {
+		t.Fatalf("%d tables", len(tables))
+	}
+	tb := tables[0]
+	want := [][]string{{"", "Year ended December 31,", "", ""}, {"", "2023", "2022", "2021"}}
+	if got := flat(tb); tb.Rows != 5 || tb.HeaderRows != 2 || !same(got[:2], want) || cellAt(tb, 0, 1).ColSpan != 3 || member[0] != 0 || tb.Y0 != 88 {
+		t.Errorf("a group ruled off: %d rows, %d header rows, span %d, member %v, top %v: %q", tb.Rows, tb.HeaderRows, cellAt(tb, 0, 1).ColSpan, member, tb.Y0, got[:2])
+	}
+
+	// The top line of one column's heading, a line longer than the rest.
+	q := &page{}
+	q.text(96, 250, "Common")
+	q.text(108, 250, "stock", 350, "Retained")
+	q.text(120, 50, "Period", 250, "issued", 350, "earnings", 450, "Total")
+	body(q, 134)
+	tables, member = Aligned(q.words, q.lines, nil)
+	if len(tables) != 1 {
+		t.Fatalf("%d tables", len(tables))
+	}
+	tb = tables[0]
+	want = [][]string{{"Period", "Common stock issued", "Retained earnings", "Total"}}
+	if got := flat(tb); tb.Rows != 4 || tb.HeaderRows != 1 || !same(got[:1], want) || member[0] != 0 || tb.Y0 != 88 {
+		t.Errorf("the top line of a heading: %d rows, %d header rows, member %v: %q", tb.Rows, tb.HeaderRows, member, got[:1])
+	}
+
+	// What stands above a table and is no part of its header.
+	for _, tc := range []struct {
+		name  string
+		above func(p *page)
+	}{
+		{"a title at the left", func(p *page) { p.text(96, 50, "Results of the year in brief") }},
+		{"a title ruled off across the table", func(p *page) {
+			p.text(96, 200, "Results of the year")
+			p.h(100, 50, 480)
+		}},
+		{"a note in brackets", func(p *page) { p.text(98, 440, "(in millions)") }},
+		{"a heading with no rule", func(p *page) { p.text(96, 300, "Year ended December 31,") }},
+		{"a line far above", func(p *page) {
+			p.text(70, 300, "Year ended December 31,")
+			p.h(74, 250, 480)
+		}},
+	} {
+		p := &page{}
+		tc.above(p)
+		p.text(110, 250, "2023", 350, "2022", 450, "2021")
+		body(p, 124)
+		tables, member := Aligned(p.words, p.lines, p.rules)
+		if len(tables) != 1 || tables[0].Rows != 4 || tables[0].HeaderRows != 1 || member[0] != -1 || tables[0].Y0 != 102 {
+			t.Errorf("%s: %d tables, member %v, %+v", tc.name, len(tables), member, flat(tables[0])[:2])
+		}
+	}
+}

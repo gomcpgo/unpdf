@@ -58,7 +58,8 @@ func isAmount(s string) bool {
 // its lines over some of the columns, the line above holds a heading for
 // that group of columns and the lines are two levels: the columns the rule
 // runs over keep both, a row for each, and the other columns, whose one
-// heading stands beside the two, have it in the lower.
+// heading stands beside the two, have it in the lower. The heading of a
+// group is one cell merged across its columns, which the row's spans give.
 //
 // It returns the rows with the header joined and the number of header
 // rows, which is 0 when nothing shows where the headings end.
@@ -236,7 +237,9 @@ func joinHeader(words []Word, rows []row, cols int, hs []hline) ([]row, int) {
 		head[i].cells = slices.Clone(rows[i].cells)
 	}
 	phrase := false
+	spans := make([][]int, h) // for each line, the columns each of its cells covers, where more than one
 	for i := 0; i < h; i++ {
+		spans[i] = make([]int, cols)
 		for c := 0; c < cols; c++ {
 			end := c
 			for end+1 < cols && runsOn(words, head[i].cells[end], head[i].cells[end+1]) {
@@ -249,6 +252,7 @@ func joinHeader(words []Word, rows []row, cols int, hs []hline) ([]row, int) {
 				head[i].cells[c] = append(slices.Clip(head[i].cells[c]), head[i].cells[k]...)
 				head[i].cells[k] = nil
 			}
+			spans[i][c] = end - c + 1
 			if phrase = true; i+1 < h {
 				for k := c; k <= end; k++ {
 					ruled[i+1][k] = true
@@ -257,6 +261,90 @@ func joinHeader(words []Word, rows []row, cols int, hs []hline) ([]row, int) {
 			}
 			c = end
 		}
+	}
+	// group makes the one heading that line i has in columns a to b the
+	// heading of them all: a cell merged across them, in the first.
+	group := func(i, a, b int) bool {
+		at := -1
+		for k := a; k <= b; k++ {
+			if len(head[i].cells[k]) == 0 {
+				continue
+			}
+			if at >= 0 {
+				return false // two headings side by side
+			}
+			at = k
+		}
+		if at < 0 {
+			return false
+		}
+		if at != a {
+			head[i].cells[a], head[i].cells[at] = head[i].cells[at], nil
+			spans[i][at] = 0
+		}
+		spans[i][a] = b - a + 1
+		return true
+	}
+	// A rule between two lines of the header, drawn in one stroke over
+	// several columns, shows how far the heading above it reaches, which
+	// its words do not: they are centred over the group, and fall in the
+	// column in its middle.
+	for i := 0; i+1 < h; i++ {
+		for a := 0; a < cols; a++ {
+			b := a
+			for b+1 < cols && stroke[i+1][a] >= 0 && stroke[i+1][b+1] == stroke[i+1][a] {
+				b++
+			}
+			if b > a {
+				group(i, a, b)
+			}
+			a = b
+		}
+	}
+	// Years side by side on the last line with one heading over them and
+	// nothing else: "Losses to December 31," over "2022" and "2023". The
+	// heading is the group's, though it may fit over one of the years and
+	// no rule sets it apart.
+	for a, last := 0, h-1; h >= 2 && a < cols; a++ {
+		if !isYears(cellText(words, head[last].cells[a])) {
+			continue
+		}
+		b := a
+		for k := a + 1; k < cols; k++ {
+			if len(head[last].cells[k]) == 0 {
+				continue
+			}
+			if !isYears(cellText(words, head[last].cells[k])) {
+				break
+			}
+			b = k
+		}
+		over := -1 // the last line above the years with a heading over them
+		for i := 0; i < last && b > a; i++ {
+			n := 0
+			for k := a; k <= b; k++ {
+				if len(head[i].cells[k]) > 0 {
+					n++
+				}
+			}
+			if n > 1 || (n == 1 && isYears(cellText(words, slices.Concat(head[i].cells[a:b+1]...)))) {
+				over = -1
+				break
+			}
+			if n == 1 {
+				over = i
+			}
+		}
+		if over >= 0 {
+			for i := 0; i <= over; i++ {
+				group(i, a, b)
+			}
+			for k := a; k <= b; k++ {
+				ruled[over+1][k] = true
+			}
+			drawn[over+1] = true
+		}
+		a = b
 	}
 	// Two rows of words above the figures may as well be a heading and a
 	// first row of data that holds no figure. They are lines of one
@@ -292,7 +380,7 @@ func joinHeader(words []Word, rows []row, cols int, hs []hline) ([]row, int) {
 	levels := level[h-1] + 1
 	out := make([]row, levels, levels+len(rows)-h)
 	for k := range out {
-		out[k] = row{cells: make([][]int, cols), y0: math.Inf(1), y1: math.Inf(-1)}
+		out[k] = row{cells: make([][]int, cols), y0: math.Inf(1), y1: math.Inf(-1), spans: make([]int, cols)}
 	}
 	for i := 0; i < h; i++ {
 		k := level[i]
@@ -304,7 +392,19 @@ func joinHeader(words []Word, rows []row, cols int, hs []hline) ([]row, int) {
 			for last+1 < h && !parted[last+1][c] {
 				last++
 			}
-			out[level[last]].cells[c] = append(out[level[last]].cells[c], idx...)
+			to := &out[level[last]]
+			to.cells[c] = append(to.cells[c], idx...)
+			to.spans[c] = max(to.spans[c], spans[i][c])
+		}
+	}
+	// What a line of a level has in a column that another line's heading
+	// is merged across is part of that heading.
+	for k := range out {
+		for c := 0; c < cols; c++ {
+			for under := c + 1; under < min(c+out[k].spans[c], cols); under++ {
+				out[k].cells[c] = append(out[k].cells[c], out[k].cells[under]...)
+				out[k].cells[under], out[k].spans[under] = nil, 0
+			}
 		}
 	}
 	return append(out, rows[h:]...), levels
