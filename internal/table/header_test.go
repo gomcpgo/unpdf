@@ -77,6 +77,15 @@ func TestHeaderOfSeveralLines(t *testing.T) {
 			p.text(124, 150, "2023", 250, "2023", 350, "2022")
 			p.h(128, 50, 400)
 		}, [][]string{{"", "Carrying 2023", "Fair 2023", "Carrying 2022"}}},
+		// And with no rule, where rows of amounts follow and the first
+		// column is left empty: a row of data has its label.
+		{"a line of years and no rule", func(p *page) {
+			p.text(110, 150, "Carrying", 250, "Fair", 350, "Carrying")
+			p.text(124, 150, "2023", 250, "2023", 350, "2022")
+		}, [][]string{{"", "Carrying 2023", "Fair 2023", "Carrying 2022"}}},
+		{"a line of years alone", func(p *page) {
+			p.text(124, 150, "2023", 250, "2022", 350, "2021")
+		}, [][]string{{"", "2023", "2022", "2021"}}},
 	} {
 		p := &page{}
 		tc.header(p)
@@ -96,6 +105,69 @@ func TestHeaderOfSeveralLines(t *testing.T) {
 		if rest := got[len(tc.want):]; !same(rest[len(rest)-3:], figureRows) {
 			t.Errorf("%s: rows of figures %q", tc.name, rest)
 		}
+	}
+}
+
+func TestHeaderRuledOffLineByLine(t *testing.T) {
+	// Each group of columns has a heading of two lines with a rule under
+	// each line, and each column a year with a rule under it. The rows of
+	// figures have no rule between them. The two lines over a group are
+	// one heading, as the rules under them cover the same columns, and
+	// the years are the level under it.
+	header := func() *page {
+		p := &page{}
+		p.text(96, 150, "Carrying Value", 350, "Fair Value")
+		p.h(100, 150, 300)
+		p.h(100, 350, 500)
+		p.text(110, 150, "December 31,", 350, "December 31,")
+		p.h(114, 150, 300)
+		p.h(114, 350, 500)
+		p.text(124, 150, "2023", 250, "2022", 350, "2023", 450, "2022")
+		for _, x := range []float64{150, 250, 350, 450} {
+			p.h(128, x, x+45)
+		}
+		return p
+	}
+	p := header()
+	p.text(140, 50, "Bonds", 150, "13,230", 250, "12,937", 350, "12,035", 450, "13,249")
+	p.text(154, 50, "Shares", 150, "15,410", 250, "11,484", 350, "14,552", 450, "12,242")
+	p.text(168, 50, "Other", 150, "426", 250, "3,629", 350, "511", 450, "3,702")
+	tables, _ := Aligned(p.words, p.lines, p.rules)
+	if len(tables) != 1 {
+		t.Fatalf("%d tables", len(tables))
+	}
+	tb := tables[0]
+	want := [][]string{{"", "Carrying Value December 31,", "", "Fair Value December 31,", ""}, {"", "2023", "2022", "2023", "2022"}}
+	if got := flat(tb); tb.HeaderRows != 2 || tb.Rows != 5 || !same(got[:2], want) {
+		t.Errorf("%d header rows of %d: %q", tb.HeaderRows, tb.Rows, got)
+	}
+
+	// The same lines over rows that are ruled off as well: a table ruled
+	// row by row, where the rules say nothing about the header, and the
+	// first line, which stands over two of the five columns, is not known
+	// to be all of it.
+	q := header()
+	for i, row := range [][5]string{{"Bonds", "13,230", "12,937", "12,035", "13,249"}, {"Shares", "15,410", "11,484", "14,552", "12,242"}, {"Other", "426", "3,629", "511", "3,702"}} {
+		y := 140 + 14*float64(i)
+		q.text(y, 50, row[0], 150, row[1], 250, row[2], 350, row[3], 450, row[4])
+		q.h(y+4, 150, 500)
+	}
+	tables, _ = Aligned(q.words, q.lines, q.rules)
+	if len(tables) != 1 || tables[0].HeaderRows != 0 || tables[0].Rows != 6 {
+		t.Errorf("ruled row by row: %+v", tables)
+	}
+}
+
+func TestYearsThatAreData(t *testing.T) {
+	// Lines of years one under the other are rows of a table of years.
+	p := &page{}
+	p.text(100, 50, "Plant", 150, "Opened", 250, "Closed")
+	p.text(114, 150, "1961", 250, "1998")
+	p.text(128, 150, "1974", 250, "2003")
+	p.text(142, 150, "1988", 250, "2011")
+	tables, _ := Aligned(p.words, p.lines, nil)
+	if len(tables) != 1 || tables[0].HeaderRows != 1 || tables[0].Rows != 4 {
+		t.Errorf("%+v", tables)
 	}
 }
 

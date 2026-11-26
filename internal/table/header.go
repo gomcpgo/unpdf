@@ -81,24 +81,45 @@ func joinHeader(words []Word, rows []row, cols int, hs []hline) ([]row, int) {
 	}
 	reach := min(len(rows)-1, limit+2)
 	ruled := make([][]bool, reach+1)
+	stroke := make([][]int, reach+1) // which rule it is, to tell one stroke over two columns from two
 	drawn, across := make([]bool, reach+1), make([]bool, reach+1)
 	for i := 1; i <= reach; i++ {
-		ruled[i] = make([]bool, cols)
+		ruled[i], stroke[i] = make([]bool, cols), make([]int, cols)
 		covered := 0
 		for c := 0; c < cols; c++ {
+			stroke[i][c] = -1
 			width := edges[c][1] - edges[c][0]
-			for _, l := range hs {
+			for k, l := range hs {
 				if l.y <= mid(rows[i-1]) || l.y >= mid(rows[i]) || width <= 0 {
 					continue
 				}
 				if over := math.Min(l.x1, edges[c][1]) - math.Max(l.x0, edges[c][0]); over >= 0.5*width {
-					ruled[i][c], drawn[i] = true, true
+					ruled[i][c], drawn[i], stroke[i][c] = true, true, k
 					covered++
 					break
 				}
 			}
 		}
 		across[i] = used > 0 && covered*5 >= used*4
+	}
+	// sameGroups reports whether the rules above lines i and k part the
+	// columns into the same groups, one of them of two columns or more: a
+	// stroke over each pair of columns, say, under both.
+	sameGroups := func(i, k int) bool {
+		wide := false
+		for c := 0; c < cols; c++ {
+			if (stroke[i][c] < 0) != (stroke[k][c] < 0) {
+				return false
+			}
+			if c+1 < cols && stroke[i][c] >= 0 && stroke[i][c+1] >= 0 {
+				joined := stroke[i][c] == stroke[i][c+1]
+				if joined != (stroke[k][c] == stroke[k][c+1]) {
+					return false
+				}
+				wide = wide || joined
+			}
+		}
+		return wide
 	}
 
 	// Down to the rule under the headings: the first one across the
@@ -108,25 +129,49 @@ func joinHeader(words []Word, rows []row, cols int, hs []hline) ([]row, int) {
 		if !across[i] {
 			continue
 		}
-		byRow := 0
-		for k := i + 1; k <= min(i+2, reach); k++ {
-			if across[k] {
-				byRow++
-			}
+		// A header with a rule under every one of its lines, each level
+		// ruled off over its columns, goes down to the last of them: the
+		// lines between the rules read as headings, and under the last
+		// rule the rows are no longer ruled off.
+		last := i
+		for last+1 <= limit && across[last+1] && headings(words, rows[:last+1]) &&
+			!(rows[last].filled() == 1 && len(rows[last].cells[0]) > 0) {
+			last++
 		}
-		// What stands above it must read as headings: words, and years.
-		if (byRow == 0 || byRow < min(2, reach-i)) && headings(words, rows[:i]) {
-			h = i
+		for _, end := range []int{last, i} {
+			byRow := 0
+			for k := end + 1; k <= min(end+2, reach); k++ {
+				if across[k] {
+					byRow++
+				}
+			}
+			// What stands above it must read as headings: words, and years.
+			// A header ruled off line by line is told from a table ruled
+			// off row by row by two rows under it with no rule between.
+			ok := byRow == 0 || byRow < min(2, reach-i)
+			if end > i {
+				ok = byRow == 0 && end+2 <= reach
+			}
+			if ok && headings(words, rows[:end]) {
+				h = end
+				break
+			}
 		}
 		break
 	}
+	years := false // the header ends in a line of years that no rule sets apart
 	if h == 0 {
 		// Down to the first row of figures.
 		figures := false
 		for h < limit {
 			if dataRow(words, rows[h]) {
-				figures = true
-				break
+				// A line of years over rows of amounts, with nothing in
+				// the first column, is the last line of the headings.
+				if !yearsLine(words, rows[h]) || !dataRow(words, rows[h+1]) || yearsLine(words, rows[h+1]) {
+					figures = true
+					break
+				}
+				years = true
 			}
 			h++
 		}
@@ -216,8 +261,9 @@ func joinHeader(words []Word, rows []row, cols int, hs []hline) ([]row, int) {
 	// Two rows of words above the figures may as well be a heading and a
 	// first row of data that holds no figure. They are lines of one
 	// heading when a rule is drawn under them, when one of them holds
-	// such a phrase, or when they are ragged, as headings of different
-	// lengths are: one of them leaves empty a column that another fills.
+	// such a phrase, when the last is a line of years, or when they are
+	// ragged, as headings of different lengths are: one of them leaves
+	// empty a column that another fills.
 	ragged := false
 	for c := 0; c < cols && !ragged; c++ {
 		with := 0
@@ -228,7 +274,7 @@ func joinHeader(words []Word, rows []row, cols int, hs []hline) ([]row, int) {
 		}
 		ragged = with > 0 && with < h
 	}
-	if !drawn[h] && !ragged && !phrase {
+	if !drawn[h] && !ragged && !phrase && !years {
 		return rows, 1
 	}
 
@@ -237,7 +283,9 @@ func joinHeader(words []Word, rows []row, cols int, hs []hline) ([]row, int) {
 	level := make([]int, h) // the level each line belongs to
 	for i := 1; i < h; i++ {
 		level[i] = level[i-1]
-		if drawn[i] {
+		// Two lines with the same groups of columns ruled off under each
+		// are two lines of the headings of those groups, not two levels.
+		if drawn[i] && !sameGroups(i, i+1) {
 			level[i]++
 		}
 	}
@@ -283,6 +331,21 @@ func headings(words []Word, rows []row) bool {
 		}
 	}
 	return filled > 0 && figures*3 <= filled
+}
+
+// yearsLine reports whether a row is a line of years set over columns:
+// nothing in the first cell, and a year or two in each of the others that
+// hold anything.
+func yearsLine(words []Word, r row) bool {
+	if len(r.cells) == 0 || len(r.cells[0]) > 0 || r.filled() == 0 {
+		return false
+	}
+	for _, idx := range r.cells {
+		if len(idx) > 0 && !isYears(cellText(words, idx)) {
+			return false
+		}
+	}
+	return true
 }
 
 // isYears reports whether every figure in s is a year, as in "2023",
