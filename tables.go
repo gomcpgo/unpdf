@@ -255,6 +255,19 @@ func pipeTable(header []string, rows [][]string) string {
 // certain, so each table carries a confidence. The text of every table
 // is also part of Blocks and Text, as lines read row by row, which is what
 // to use when the confidence is low.
+// onlyFurniture reports whether every word of a table is on a running head
+// or foot: a box drawn round the head, which repeats from page to page.
+func onlyFurniture(t table.Table, furniture []bool) bool {
+	for _, c := range t.Cells {
+		for _, i := range c.Words {
+			if !furniture[i] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (p *Page) Tables(ctx context.Context) ([]Table, error) {
 	if p.tabled {
 		return p.tables, nil
@@ -276,19 +289,34 @@ func (p *Page) Tables(ctx context.Context) ([]Table, error) {
 	}
 	var words []table.Word
 	var lines []table.Line
+	var furniture []bool // for each word, whether it is on a running head or foot
 	rtl := 0
 	for _, b := range laid {
-		if b.Furniture || b.Angle != 0 {
+		if b.Angle != 0 {
 			continue
 		}
 		if p.tags != nil && b.Group > 0 && b.Group <= len(p.tags.groups) && p.tags.groups[b.Group-1].table != 0 {
 			continue
 		}
 		for _, l := range b.Lines {
+			if b.Furniture {
+				// A line that repeats in the same place on the pages
+				// around is a running head, unless a table's rules are
+				// drawn round it: tables of one layout on pages that
+				// follow each other repeat their headings too. Its words
+				// are there for the grid of rules to take; the search by
+				// alignment, which goes by lines, leaves it out.
+				for _, w := range l.Words {
+					words = append(words, table.Word{Text: w.Text, X0: w.Box.X0, Y0: w.Box.Y0, X1: w.Box.X1, Y1: w.Box.Y1, Size: w.Size, Bold: w.Bold})
+					furniture = append(furniture, true)
+				}
+				continue
+			}
 			tl := table.Line{X0: l.Box.X0, Y0: l.Box.Y0, X1: l.Box.X1, Y1: l.Box.Y1, Words: make([]int, len(l.Words))}
 			for k, w := range l.Words {
 				tl.Words[k] = len(words)
 				words = append(words, table.Word{Text: w.Text, X0: w.Box.X0, Y0: w.Box.Y0, X1: w.Box.X1, Y1: w.Box.Y1, Size: w.Size, Bold: w.Bold})
+				furniture = append(furniture, false)
 			}
 			if l.RTL {
 				// A right-to-left line has its words in reading order; the
@@ -319,7 +347,8 @@ func (p *Page) Tables(ctx context.Context) ([]Table, error) {
 			// A grid of one column is a list in a box. If its text lines up
 			// in columns, the search below finds them. A grid around a
 			// table already known from the document's tags adds nothing.
-			if t.Cols > 1 && !marked((t.X0+t.X1)/2, (t.Y0+t.Y1)/2) {
+			// Nor does a box round a running head.
+			if t.Cols > 1 && !marked((t.X0+t.X1)/2, (t.Y0+t.Y1)/2) && !onlyFurniture(t, furniture) {
 				found = append(found, t)
 			}
 		}
