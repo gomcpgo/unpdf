@@ -308,6 +308,32 @@ func TestAlignedGroupNamedOverTheFigures(t *testing.T) {
 	}
 }
 
+func TestAlignedTotalUnderTheRows(t *testing.T) {
+	// The total has no label and is set close under the last row, which
+	// leaves two of its columns empty. It is a row of its own all the
+	// same: the row above already has its figures in those cells.
+	p := &page{}
+	p.text(100, 50, "Investment", 200, "2023", 260, "2022", 320, "2023", 380, "2022")
+	p.text(115, 50, "Kraft Heinz", 200, "13,230", 260, "12,937", 320, "12,035", 380, "13,249")
+	p.text(130, 50, "Occidental", 200, "15,410", 260, "11,484", 320, "14,552", 380, "12,242")
+	p.text(141, 50, "Other", 200, "426", 260, "3,629")
+	p.text(152, 200, "29,066", 260, "28,050")
+	tables, _ := Aligned(p.words, p.lines, nil)
+	if len(tables) != 1 {
+		t.Fatalf("%d tables", len(tables))
+	}
+	want := [][]string{
+		{"Investment", "2023", "2022", "2023", "2022"},
+		{"Kraft Heinz", "13,230", "12,937", "12,035", "13,249"},
+		{"Occidental", "15,410", "11,484", "14,552", "12,242"},
+		{"Other", "426", "3,629", "", ""},
+		{"", "29,066", "28,050", "", ""},
+	}
+	if got := rowsOf(tables[0]); !same(got, want) {
+		t.Errorf("rows = %q", got)
+	}
+}
+
 func TestAlignedProseInColumns(t *testing.T) {
 	// Two columns of prose that wraps. With rules between the rows they
 	// are rows of a table; without, nothing says where a row ends.

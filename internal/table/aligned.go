@@ -932,7 +932,7 @@ func mergeContinuations(words []Word, lines []row, cols int, size float64) []row
 		n := len(out)
 		if n > 0 && l.y0-out[n-1].y1 < 0.35*size {
 			prev := &out[n-1]
-			if len(l.cells[0]) == 0 && l.filled()*2 <= cols {
+			if len(l.cells[0]) == 0 && l.filled()*2 <= cols && !secondFigure(words, *prev, l) {
 				prev.absorb(l)
 				continue
 			}
@@ -948,6 +948,65 @@ func mergeContinuations(words []Word, lines []row, cols int, size float64) []row
 		out = append(out, l)
 	}
 	return out
+}
+
+// secondFigure reports whether a line puts a figure into a cell where the
+// row above already has a cell of figures: figures, currency signs and
+// dashes, and nothing else. Such a cell holds one figure, so the line is a
+// row of its own: a total under the rows, or the next row of a table whose
+// first column is left empty, not the rest of the row above. A heading
+// such as "December 30," with "2023" under it, or a line of prose that
+// names "Title 2", goes on as before.
+func secondFigure(words []Word, above, l row) bool {
+	has := func(idx []int) bool {
+		for _, i := range idx {
+			if isFigure(words[i].Text) {
+				return true
+			}
+		}
+		return false
+	}
+	only := func(idx []int) bool {
+		for _, i := range idx {
+			if t := words[i].Text; !isFigure(t) && !isAmount(t) && !isDash(t) {
+				return false
+			}
+		}
+		return has(idx)
+	}
+	for c := range l.cells {
+		if c < len(above.cells) && has(l.cells[c]) && only(above.cells[c]) {
+			return true
+		}
+	}
+	return false
+}
+
+// isFigure reports a figure as tables of figures set them, and nothing
+// else: digits with their separators, a sign, brackets round a negative
+// figure, a percent sign or a footnote star after it. Unlike isNumeric it
+// takes no letters, so that "3x3" and "x2y3" are not figures.
+func isFigure(s string) bool {
+	digits := 0
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			digits++
+		case strings.ContainsRune(",.'\u00a0\u2009\u202f()-−+%*", r):
+		default:
+			return false
+		}
+	}
+	return digits > 0
+}
+
+// isDash reports a dash that stands for nothing in a column of figures.
+func isDash(s string) bool {
+	switch s {
+	case "—", "–", "-", "−":
+		return true
+	}
+	return false
 }
 
 // listLike reports a numbered or bulleted list whose markers stand apart
