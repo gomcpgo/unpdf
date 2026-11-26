@@ -280,6 +280,34 @@ func TestAlignedRows(t *testing.T) {
 	}
 }
 
+func TestAlignedGroupNamedOverTheFigures(t *testing.T) {
+	// A line under the first row names the rows that follow. It is set
+	// over the columns of figures, not under the labels, and runs across
+	// the gaps between them. The columns are still told apart, and the
+	// line is one cell.
+	p := &page{}
+	p.text(100, 50, "Total", 78, "...........", 160, "48 200", 210, "3 650", 260, "310", 310, "52 160")
+	p.text(115, 160, "by kind of proceedings")
+	p.text(130, 50, "Opened", 88, "........", 160, "48 200", 210, "X", 260, "X", 310, "48 200")
+	p.text(145, 50, "Closed", 88, "........", 160, "X", 210, "3 650", 260, "310", 310, "3 960")
+	if l := p.lines[1]; l.X1 < 260 {
+		t.Fatalf("the line ends at %.0f, short of the third column of figures", l.X1)
+	}
+	tables, _ := Aligned(p.words, p.lines, nil)
+	if len(tables) != 1 {
+		t.Fatalf("%d tables", len(tables))
+	}
+	want := [][]string{
+		{"Total ...........", "48 200", "3 650", "310", "52 160"},
+		{"", "by kind of proceedings", "", "", ""},
+		{"Opened ........", "48 200", "X", "X", "48 200"},
+		{"Closed ........", "X", "3 650", "310", "3 960"},
+	}
+	if got := rowsOf(tables[0]); !same(got, want) {
+		t.Errorf("rows = %q", got)
+	}
+}
+
 func TestAlignedProseInColumns(t *testing.T) {
 	// Two columns of prose that wraps. With rules between the rows they
 	// are rows of a table; without, nothing says where a row ends.

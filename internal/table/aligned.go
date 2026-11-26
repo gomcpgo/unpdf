@@ -52,13 +52,7 @@ func Aligned(words []Word, lines []Line, rules []Rule) ([]Table, []int) {
 	// A line is tabular when it has a gap wide enough to separate cells.
 	tabular := make([]bool, len(lines))
 	for i, l := range lines {
-		for j := 1; j < len(l.Words); j++ {
-			a, b := words[l.Words[j-1]], words[l.Words[j]]
-			if b.X0-a.X1 > cellGap*math.Max(a.Size, b.Size) {
-				tabular[i] = true
-				break
-			}
-		}
+		tabular[i] = gapped(words, l)
 	}
 
 	var tables []Table
@@ -144,6 +138,94 @@ func Aligned(words []Word, lines []Line, rules []Rule) ([]Table, []int) {
 		start = end
 	}
 	return tables, member
+}
+
+// gapped reports whether a line has a gap wide enough to part two cells.
+func gapped(words []Word, l Line) bool {
+	for j := 1; j < len(l.Words); j++ {
+		a, b := words[l.Words[j-1]], words[l.Words[j]]
+		if b.X0-a.X1 > cellGap*math.Max(a.Size, b.Size) {
+			return true
+		}
+	}
+	return false
+}
+
+// groupNames reports, for each line, whether it names a group of the rows
+// below it from over the columns of figures ("by kind of proceedings"): a
+// line of words, with no gap wide enough to part cells, that comes after a
+// row of figures, begins to the right of every row's first cell, and runs
+// across a gap that the other lines leave between two columns. Such a line
+// says nothing of where the columns are, and is one cell.
+//
+// Lines of one phrase that begin under the first cells are left alone:
+// the further lines of a label, or a group's name set as a label. So are
+// those above the first row of figures: they are the header's, whose
+// phrases across columns are headings of groups of columns. And so are
+// lines that keep within a column, as the further lines of a cell do.
+func groupNames(words []Word, lines []Line, x0, x1, size float64) []bool {
+	named := candidates(words, lines)
+	var others []Line
+	for li, l := range lines {
+		if !named[li] {
+			others = append(others, l)
+		}
+	}
+	if len(others) == len(lines) || len(others) < 2 {
+		return make([]bool, len(lines))
+	}
+	seps := separators(words, others, x0, x1, size)
+	for li, l := range lines {
+		if !named[li] {
+			continue
+		}
+		crosses := false
+		for _, i := range l.Words {
+			w := words[i]
+			if isNumeric(w.Text) {
+				crosses = false
+				break
+			}
+			for _, s := range seps {
+				crosses = crosses || (w.X0 < s && w.X1 > s)
+			}
+		}
+		named[li] = crosses
+	}
+	return named
+}
+
+// candidates returns the lines that may name a group of rows from over the
+// columns of figures, by where they stand: lines of one phrase, after a row
+// of figures, that begin to the right of every row's first cell.
+func candidates(words []Word, lines []Line) []bool {
+	named := make([]bool, len(lines))
+	labels := math.Inf(-1) // where the first cells of the rows with gaps end
+	for _, l := range lines {
+		if !gapped(words, l) {
+			continue
+		}
+		starts := cellStarts(words, l)
+		for _, i := range l.Words {
+			if w := words[i]; w.X0 < starts[1] {
+				labels = math.Max(labels, w.X1)
+			}
+		}
+	}
+	figures := false
+	for li, l := range lines {
+		if !gapped(words, l) {
+			named[li] = figures && l.X0 > labels
+			continue
+		}
+		for _, i := range l.Words {
+			if isNumeric(words[i].Text) {
+				figures = true
+				break
+			}
+		}
+	}
+	return named
 }
 
 // cellStarts returns where each cell of a line begins: the left edge of
@@ -345,7 +427,14 @@ func align(words []Word, lines []Line, hs []hline) (Table, bool) {
 		return Table{}, false
 	}
 	x0, x1, size := extent(words, lines)
-	seps := separators(words, lines, x0, x1, size)
+	named := groupNames(words, lines, x0, x1, size)
+	gapLines := make([]Line, 0, len(lines))
+	for li, l := range lines {
+		if !named[li] {
+			gapLines = append(gapLines, l)
+		}
+	}
+	seps := separators(words, gapLines, x0, x1, size)
 	if len(seps) == 0 || len(seps) > 60 {
 		return Table{}, false
 	}
@@ -359,11 +448,22 @@ func align(words []Word, lines []Line, hs []hline) (Table, bool) {
 		crosses := false
 		for _, i := range l.Words {
 			w := words[i]
-			c := sort.SearchFloat64s(seps, (w.X0+w.X1)/2)
-			cells[c] = append(cells[c], i)
 			for _, s := range seps {
 				crosses = crosses || (w.X0 < s && w.X1 > s)
 			}
+		}
+		at := -1 // the one cell of a line that names a group of rows
+		if crosses && named[li] && len(l.Words) > 0 {
+			w := words[l.Words[0]]
+			at = sort.SearchFloat64s(seps, (w.X0+w.X1)/2)
+		}
+		for _, i := range l.Words {
+			c := at
+			if c < 0 {
+				w := words[i]
+				c = sort.SearchFloat64s(seps, (w.X0+w.X1)/2)
+			}
+			cells[c] = append(cells[c], i)
 		}
 		if crosses {
 			spanning++
