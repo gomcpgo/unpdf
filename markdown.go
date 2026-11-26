@@ -35,6 +35,23 @@ type MarkdownOptions struct {
 	// output then ends with a comment that says where it stopped. Zero
 	// means no limit.
 	MaxBytes int
+	// MinTableConfidence is the confidence, as in Table.Confidence, from
+	// which a table is shown as a table. Tables found with less stay lines
+	// of text. Zero means DefaultTableConfidence. A negative value shows
+	// every table that is found, and a value above 1 shows none.
+	MinTableConfidence float64
+}
+
+// DefaultTableConfidence is the confidence from which Markdown shows a table
+// as a table when MarkdownOptions.MinTableConfidence is not set.
+const DefaultTableConfidence = 0.5
+
+// tableConfidence returns the confidence from which tables are shown.
+func (o MarkdownOptions) tableConfidence() float64 {
+	if o.MinTableConfidence == 0 {
+		return DefaultTableConfidence
+	}
+	return o.MinTableConfidence
 }
 
 // Markdown converts the document to Markdown: headings, paragraphs with
@@ -156,10 +173,6 @@ type token struct {
 	link int // index into the page's links, or -1
 }
 
-// minTableConfidence is the confidence from which Markdown shows a table
-// as a table.
-const minTableConfidence = 0.5
-
 // tableTail describes the table a page ends with, for the page after it.
 type tableTail struct {
 	header  []string
@@ -229,8 +242,9 @@ func (p *Page) markdown(ctx context.Context, opts MarkdownOptions, carry *tableT
 		return "", false, nil, err
 	}
 	var tables []Table
+	least := opts.tableConfidence()
 	for _, t := range all {
-		if t.Confidence >= minTableConfidence {
+		if t.Confidence >= least {
 			tables = append(tables, t)
 		}
 	}

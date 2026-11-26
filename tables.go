@@ -41,7 +41,8 @@ type Table struct {
 	// Confidence says how sure the detection is, from 0 to 1. A table the
 	// document itself marks, or one drawn as a full grid, is near 1. One
 	// inferred from text that lines up is lower, and lower still when it is
-	// small or ragged. Markdown shows a table as a table only from 0.5.
+	// small or ragged. Markdown shows a table as a table only from 0.5,
+	// unless MarkdownOptions.MinTableConfidence says otherwise.
 	Confidence float64
 	// Method says how the table was found: TableFromStructure,
 	// TableFromRules or TableFromAlignment.

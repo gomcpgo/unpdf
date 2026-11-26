@@ -98,7 +98,7 @@ for _, t := range tables {
 }
 ```
 
-A table carries the way it was found (`Method`) and how sure the detection is (`Confidence`). Markdown shows a table as a table from a confidence of 0.5, and as lines of text below that.
+A table carries the way it was found (`Method`) and how sure the detection is (`Confidence`). Markdown shows a table as a table from a confidence of 0.5, and as lines of text below that. `MarkdownOptions.MinTableConfidence` moves the line: set it higher to keep only the sure ones, or below zero to show every table found.
 
 Images, each with its place on the page and its size in pixels:
 
