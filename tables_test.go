@@ -141,6 +141,51 @@ func TestAlignedTableAndConfidence(t *testing.T) {
 	}
 }
 
+func TestMarkdownTableConfidence(t *testing.T) {
+	// One table Markdown is sure of and one it is not: see the test above.
+	doc := pagesOf(t, cells(660, 72, "Team", 250, "Start", 350, "End")+
+		cells(645, 72, "Engineering", 250, "120", 350, "134")+
+		cells(630, 72, "Support", 250, "88", 350, "97")+
+		cells(615, 72, "Sales and marketing", 250, "204", 350, "224")+
+		cells(540, 72, "Invoice number", 250, "INV-0417")+
+		cells(525, 72, "Customer", 250, "Acme Tooling")+
+		cells(510, 72, "Terms", 250, "Net thirty"))
+	p, _ := doc.Page(ctx, 1)
+	tables, _ := p.Tables(ctx)
+	if len(tables) != 2 || tables[0].Confidence < 0.5 || tables[1].Confidence >= 0.5 || tables[1].Confidence <= 0 {
+		t.Fatalf("tables: %+v", tables)
+	}
+	const sure, unsure = "| Team | Start | End |", "| Invoice number | INV-0417 |"
+	between := (tables[0].Confidence + tables[1].Confidence) / 2
+	for _, tc := range []struct {
+		name               string
+		min                float64
+		wantSure, wantBoth bool
+	}{
+		{"the zero value is the default", 0, true, false},
+		{"the default by name", DefaultTableConfidence, true, false},
+		{"a negative value shows every table", -1, true, true},
+		{"just the confidence of the unsure table", tables[1].Confidence, true, true},
+		{"between the two", between, true, false},
+		{"just the confidence of the sure table", tables[0].Confidence, true, false},
+		{"above both", tables[0].Confidence + 0.01, false, false},
+		{"above 1 shows none", 1.5, false, false},
+	} {
+		md, err := doc.Markdown(ctx, MarkdownOptions{OmitPageMarkers: true, MinTableConfidence: tc.min})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		gotSure, gotUnsure := strings.Contains(md, sure), strings.Contains(md, unsure)
+		if gotSure != tc.wantSure || gotUnsure != tc.wantBoth {
+			t.Errorf("%s (%.2f): sure table shown %v, unsure table shown %v:\n%s", tc.name, tc.min, gotSure, gotUnsure, md)
+		}
+		// Whatever is not a table is still there as text.
+		if !strings.Contains(md, "Engineering") || !strings.Contains(md, "Acme Tooling") {
+			t.Errorf("%s: text was lost:\n%s", tc.name, md)
+		}
+	}
+}
+
 func TestTableAcrossPages(t *testing.T) {
 	header := cells(100, 72, "Year", 250, "Low", 350, "High")
 	rowsA := cells(85, 72, "2023", 250, "6.1", 350, "19.7") + cells(70, 72, "2024", 250, "6.1", 350, "19.9") + cells(55, 72, "2025", 250, "6.2", 350, "20.1")

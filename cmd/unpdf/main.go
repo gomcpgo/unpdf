@@ -5,7 +5,7 @@
 //
 //	unpdf info [-password PW] [-json] file.pdf
 //	unpdf text [-password PW] [-first N] [-last N] file.pdf
-//	unpdf markdown [-password PW] [-pages LIST] [-furniture] [-no-page-markers] file.pdf
+//	unpdf markdown [-password PW] [-pages LIST] [-furniture] [-no-page-markers] [-table-confidence N] file.pdf
 //	unpdf outline [-password PW] file.pdf
 //	unpdf tables [-password PW] [-first N] [-last N] [-min CONFIDENCE] file.pdf
 //	unpdf images [-password PW] [-first N] [-last N] [-all] [-out DIR] file.pdf
@@ -67,7 +67,7 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: unpdf info [-password PW] [-json] file.pdf")
 	fmt.Fprintln(os.Stderr, "       unpdf text [-password PW] [-first N] [-last N] file.pdf")
-	fmt.Fprintln(os.Stderr, "       unpdf markdown [-password PW] [-pages LIST] [-furniture] [-no-page-markers] file.pdf")
+	fmt.Fprintln(os.Stderr, "       unpdf markdown [-password PW] [-pages LIST] [-furniture] [-no-page-markers] [-table-confidence N] file.pdf")
 	fmt.Fprintln(os.Stderr, "       unpdf outline [-password PW] file.pdf")
 	fmt.Fprintln(os.Stderr, "       unpdf tables [-password PW] [-first N] [-last N] [-min CONFIDENCE] file.pdf")
 	fmt.Fprintln(os.Stderr, "       unpdf images [-password PW] [-first N] [-last N] [-all] [-out DIR] file.pdf")
@@ -210,6 +210,7 @@ func markdown(ctx context.Context, args []string) error {
 	pages := fs.String("pages", "", "pages to convert, such as 1-5,8,12-")
 	furniture := fs.Bool("furniture", false, "keep running heads and page numbers")
 	noMarkers := fs.Bool("no-page-markers", false, "leave out the comment before each page")
+	confidence := fs.Float64("table-confidence", unpdf.DefaultTableConfidence, "show a table as a table from this confidence, 0 to 1; 0 shows every table found")
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		usage()
@@ -220,7 +221,12 @@ func markdown(ctx context.Context, args []string) error {
 	}
 	defer doc.Close()
 	out := bufio.NewWriter(os.Stdout)
-	err = doc.WriteMarkdown(ctx, out, unpdf.MarkdownOptions{Pages: *pages, Furniture: *furniture, OmitPageMarkers: *noMarkers})
+	opts := unpdf.MarkdownOptions{Pages: *pages, Furniture: *furniture, OmitPageMarkers: *noMarkers, MinTableConfidence: *confidence}
+	if *confidence <= 0 {
+		// In the options zero stands for the default.
+		opts.MinTableConfidence = -1
+	}
+	err = doc.WriteMarkdown(ctx, out, opts)
 	out.Flush()
 	if err != nil {
 		return err
