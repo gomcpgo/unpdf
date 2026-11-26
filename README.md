@@ -2,7 +2,7 @@
 
 A pure-Go library for getting the content out of PDF files, built for feeding documents to language models and search indexes.
 
-**Status: early.** It opens, repairs and decrypts PDFs, reads metadata, and extracts text in reading order: as Markdown with headings, lists, tables and links, as plain text, or as blocks, lines and words with their positions. It finds tables and gives their cells, reads the structure tree of tagged PDFs, and returns the outline, links, comments and form fields. Images are next.
+**Status: early.** It opens, repairs and decrypts PDFs, reads metadata, and extracts text in reading order: as Markdown with headings, lists, tables and links, as plain text, or as blocks, lines and words with their positions. It finds tables and gives their cells, reads the structure tree of tagged PDFs, and returns the outline, links, comments and form fields. It lists the images on each page and extracts them as PNG or JPEG files.
 
 - No cgo, no external programs, no dependencies outside the Go standard library.
 - Safe on untrusted input: bounded memory, configurable limits, no panics on malformed files. Every parser has a fuzz target.
@@ -100,6 +100,22 @@ for _, t := range tables {
 
 A table carries the way it was found (`Method`) and how sure the detection is (`Confidence`). Markdown shows a table as a table from a confidence of 0.5, and as lines of text below that.
 
+Images, each with its place on the page and its size in pixels:
+
+```go
+images, err := page.Images(ctx, unpdf.ImageOptions{})
+for _, img := range images {
+    data, err := img.Extract(ctx)
+    if err != nil {
+        continue // a colour space that cannot be converted, or an image over the limits
+    }
+    name := fmt.Sprintf("page-%d-%dx%d%s", page.Number, img.Width, img.Height, img.Format.Extension())
+    os.WriteFile(name, data, 0o644)
+}
+```
+
+A JPEG image comes back as the JPEG file the document holds. Other images are converted to PNG, with a mask as the alpha channel. JPEG 2000, JBIG2 and CCITT fax images come back as the document holds them, not decoded, with `Format` saying which. Small images, such as bullets and rules, and images that repeat from page to page, such as a logo, are left out unless `ImageOptions` asks for them.
+
 The rest of what a document carries:
 
 ```go
@@ -119,6 +135,7 @@ go run github.com/gomcpgo/unpdf/cmd/unpdf text report.pdf
 go run github.com/gomcpgo/unpdf/cmd/unpdf markdown -pages 1-10 report.pdf
 go run github.com/gomcpgo/unpdf/cmd/unpdf outline report.pdf
 go run github.com/gomcpgo/unpdf/cmd/unpdf tables -min 0.5 report.pdf
+go run github.com/gomcpgo/unpdf/cmd/unpdf images -out pictures report.pdf
 ```
 
 ## What works today
@@ -156,6 +173,11 @@ go run github.com/gomcpgo/unpdf/cmd/unpdf tables -min 0.5 report.pdf
   - Each with a confidence. Forms, charts, tables of contents and numbered lists, which can look like tables, score low.
   - A title drawn or tagged as the table's first row, and notes as its last rows, are left out of the table and read as text around it. Dot leaders are left out of cells. A line that names a group of rows is a row of its own.
   - In Markdown, a table that runs on over a page break is continued under the same header.
+- Images:
+  - The images of a page with their position and their size in pixels, including inline images and those drawn by forms and annotations. Images outside the visible part of the page, or clipped away, are left out.
+  - JPEG images as they are. JPEG 2000, JBIG2 (with its global segments) and CCITT fax images as they are too, not decoded, with the parameters a CCITT decoder needs.
+  - Every other image as PNG: grey, RGB, CMYK, indexed, Lab and ICC-based colour at 1 to 16 bits per component, `/Decode` arrays, and soft masks, stencil masks and colour-key masks as transparency. Grey and RGB keep their bit depth, and an indexed image stays a palette image.
+  - Small images and images repeated in the same place on the neighbouring pages are marked, and left out by default. The strips or tiles of a picture stored in pieces are not counted as small.
 
 ## What does not work yet
 
@@ -167,6 +189,9 @@ go run github.com/gomcpgo/unpdf/cmd/unpdf tables -min 0.5 report.pdf
 - A two-column layout whose columns hold only a word or two per line is read across, like a table.
 - In right-to-left text, a number next to a Latin phrase keeps its position on the page, which is ambiguous; vowel points may be attached to the wrong side of a letter.
 - Fonts whose only route to Unicode is a CFF font program's charset give U+FFFD, with a warning that names the font and counts the glyphs.
+- Images are converted to PNG without colour management: an ICC profile is taken for the device space with as many components, and CMYK becomes RGB by the plain formula, so colours can be off. A spot colour (a Separation space) comes out as grey, and a DeviceN space of spot colours is not converted at all.
+- JPEG 2000, JBIG2 and CCITT images are not decoded, and the mask of an image returned as it is, such as a JPEG, is not applied.
+- A picture stored as strips or tiles comes back as that many images. Pictures drawn by a tiling pattern or as the glyphs of a font are not listed, and Markdown output does not mention images.
 
 ## Errors
 
@@ -177,7 +202,7 @@ go run github.com/gomcpgo/unpdf/cmd/unpdf tables -min 0.5 report.pdf
 | `ErrWrongPassword` | The password supplied was rejected. Also matches `ErrPasswordRequired`. |
 | `ErrDamaged` | The file could not be read even after repair. |
 | `*UnsupportedError` | The document uses a feature the library does not handle; `Feature` names it. |
-| `*LimitError` | The document exceeded one of the `Limits`. |
+| `*LimitError` | The document, or an image being converted, exceeded one of the `Limits`. |
 
 ## Licence
 

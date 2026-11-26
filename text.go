@@ -91,6 +91,10 @@ const maxPageRules = 4000
 type pageContent struct {
 	glyphs []content.Glyph
 	images []content.Image
+	// inlineBytes counts the data kept for inline images, and inlineDropped
+	// reports that some was not kept.
+	inlineBytes   int
+	inlineDropped bool
 	// rules are the straight lines drawn across or down the page.
 	rules []content.Rule
 	// shown counts the glyphs with text that a reader can see.
@@ -180,9 +184,19 @@ func (p *Page) interpret(ctx context.Context) (*pageContent, error) {
 			return true
 		},
 		Image: func(img content.Image) {
-			if len(pc.images) < 10_000 {
-				pc.images = append(pc.images, img)
+			if len(pc.images) >= maxPageImages {
+				return
 			}
+			if img.Inline && img.Data != nil {
+				// The data is part of the content stream, which is let go.
+				if pc.inlineBytes+len(img.Data) > maxInlineImageBytes {
+					img.Data, pc.inlineDropped = nil, true
+				} else {
+					pc.inlineBytes += len(img.Data)
+					img.Data = bytes.Clone(img.Data)
+				}
+			}
+			pc.images = append(pc.images, img)
 		},
 		Rule: func(r content.Rule) {
 			if len(pc.rules) < maxPageRules {

@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image/png"
 	"math"
 	"os"
 	"strings"
@@ -503,8 +504,24 @@ func FuzzOpen(f *testing.F) {
 			cells(626, 76, "Team", 176, "Start", 276, "End") + cells(606, 76, "Support", 176, "88", 276, "97") + cells(586, 76, "Sales", 176, "204", 276, "224"),
 	})
 	f.Add(ruled.Bytes())
+	// Pages with images of several kinds, one of them repeated.
+	f.Add(logoBook(4, false))
+	pictures := pdftest.New()
+	mask := pictures.AddStream("<< /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Matte [1 1 1] >>", []byte{255, 9})
+	rgb := pictures.AddStream(fmt.Sprintf("<< /Subtype /Image /Width 2 /Height 1 /ColorSpace [/ICCBased %d 0 R] /BitsPerComponent 8 /SMask %d 0 R "+
+		"/Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 3 /Columns 2 >> >>", pictures.AddStream("<< /N 3 >>", nil), mask),
+		pdftest.Flate([]byte{0, 1, 2, 3, 4, 5, 6}))
+	indexed := pictures.AddStream("<< /Subtype /Image /Width 4 /Height 2 /ColorSpace [/Indexed [/Lab << /Range [-9 9 -9 9] >>] 1 <00FF00 FFFF00>] "+
+		"/BitsPerComponent 1 /Decode [1 0] /Mask [0 0] >>", []byte{0xA0, 0x50})
+	fax := pictures.AddStream("<< /Subtype /Image /Width 8 /Height 8 /ImageMask true /Filter [/ASCIIHexDecode /CCITTFaxDecode] /DecodeParms [null << /K -1 >>] >>", []byte("00>"))
+	pictures.Pages(pdftest.PageSpec{
+		Resources: fmt.Sprintf("<< /XObject << /A %d 0 R /B %d 0 R /C %d 0 R >> /ColorSpace << /Ink [/Separation /Gold /DeviceCMYK << >>] >> >>", rgb, indexed, fax),
+		Content: "q 200 0 0 100 50 600 cm /A Do Q q 0 0 300 300 re W n 100 0 0 100 250 250 cm /B Do Q q 50 0 0 50 300 300 cm /C Do Q " +
+			"q 40 0 0 40 10 10 cm BI /W 2 /H 2 /BPC 4 /CS /Ink /F /AHx ID 0F F0> EI Q BI /W 1 /H 1 /IM true /D [1 0] ID \x80 EI",
+	})
+	f.Add(pictures.Bytes())
 	opts := Options{Limits: Limits{
-		MaxObjects: 4096, MaxStreamBytes: 1 << 20, MaxDepth: 32, MaxStringBytes: 1 << 16, MaxItems: 1 << 12, MaxPages: 64,
+		MaxObjects: 4096, MaxStreamBytes: 1 << 20, MaxDepth: 32, MaxStringBytes: 1 << 16, MaxItems: 1 << 12, MaxPages: 64, MaxImagePixels: 1 << 16,
 	}}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		doc, err := Open(ctx, bytes.NewReader(data), int64(len(data)), opts)
@@ -558,6 +575,25 @@ func FuzzOpen(f *testing.F) {
 			}
 			if _, err := p.Annotations(ctx); err != nil {
 				t.Fatalf("Annotations failed without cancellation: %v", err)
+			}
+			images, err := p.Images(ctx, ImageOptions{Small: true, Repeated: true})
+			if err != nil {
+				t.Fatalf("Images failed without cancellation: %v", err)
+			}
+			for i := range images {
+				img := &images[i]
+				if img.Width < 1 || img.Height < 1 || !(img.Box.X1 > img.Box.X0 && img.Box.Y1 > img.Box.Y0) {
+					t.Fatalf("page %d: bad image %+v", n, img)
+				}
+				// Whatever Extract makes of a damaged image, a PNG it
+				// returns is a PNG of the size it said.
+				data, err := img.Extract(ctx)
+				if err != nil || img.Format != FormatPNG {
+					continue
+				}
+				if cfg, err := png.DecodeConfig(bytes.NewReader(data)); err != nil || cfg.Width != img.Width || cfg.Height != img.Height {
+					t.Fatalf("page %d: image of %d x %d gave a PNG of %d x %d, err %v", n, img.Width, img.Height, cfg.Width, cfg.Height, err)
+				}
 			}
 		}
 		if n > 64 {

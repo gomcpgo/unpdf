@@ -88,6 +88,11 @@ type Limits struct {
 	MaxPages int
 	// MaxPageGlyphs caps the glyphs read from one page. Default 500,000.
 	MaxPageGlyphs int
+	// MaxImagePixels caps the pixels, width times height, of an image that
+	// Image.Extract converts to PNG. Images returned as the document holds
+	// them, such as JPEG, are not converted and not capped. Default
+	// 134,217,728, which is a square of 11,585 pixels.
+	MaxImagePixels int64
 	// MaxWarnings caps how many warnings are kept. Default 200.
 	MaxWarnings int
 }
@@ -116,17 +121,19 @@ type Document struct {
 	info     Info
 	maxPages int
 
-	maxStream     int64
-	maxPageGlyphs int
-	fonts         *font.Cache
-	glyphStats    map[*font.Font]map[int]glyphCount
-	bandCache     map[int]map[string]bool
-	recent        []*Page
-	styles        *styleModel
-	tagTree       *structTree // the structure tree of a tagged document
-	tagsChecked   bool
-	pageNumbers   map[int]int // page object number to page number
-	titles        map[int][]outlineTitle
+	maxStream      int64
+	maxPageGlyphs  int
+	maxImagePixels int64
+	markCache      map[int][]imageMark // what each page shows of images, to find the repeated ones
+	fonts          *font.Cache
+	glyphStats     map[*font.Font]map[int]glyphCount
+	bandCache      map[int]map[string]bool
+	recent         []*Page
+	styles         *styleModel
+	tagTree        *structTree // the structure tree of a tagged document
+	tagsChecked    bool
+	pageNumbers    map[int]int // page object number to page number
+	titles         map[int][]outlineTitle
 }
 
 // Open reads a PDF from r, which must stay readable until the Document is
@@ -151,7 +158,7 @@ func Open(ctx context.Context, r io.ReaderAt, size int64, opts Options) (*Docume
 	if err != nil {
 		return nil, publicErr(err)
 	}
-	d := &Document{f: f, maxPages: lim.MaxPages, maxStream: lim.MaxStreamBytes, maxPageGlyphs: lim.MaxPageGlyphs}
+	d := &Document{f: f, maxPages: lim.MaxPages, maxStream: lim.MaxStreamBytes, maxPageGlyphs: lim.MaxPageGlyphs, maxImagePixels: lim.MaxImagePixels}
 	if d.maxPages <= 0 {
 		d.maxPages = defaultMaxPages
 	}
@@ -160,6 +167,9 @@ func Open(ctx context.Context, r io.ReaderAt, size int64, opts Options) (*Docume
 	}
 	if d.maxPageGlyphs <= 0 {
 		d.maxPageGlyphs = defaultMaxPageGlyphs
+	}
+	if d.maxImagePixels <= 0 {
+		d.maxImagePixels = defaultMaxImagePixels
 	}
 	d.catalog = f.Dict(ctx, f.Trailer["Root"])
 	d.info = d.readInfo(ctx)

@@ -6,7 +6,7 @@
 // text-showing operators, form XObjects and marked content.
 //
 // It does not render. Paths, colours and shadings are skipped; images are
-// reported by their position only.
+// reported with their position, not drawn.
 package content
 
 import (
@@ -82,9 +82,24 @@ type Glyph struct {
 
 // Image is an image placed on the page.
 type Image struct {
-	// X0, Y0, X1, Y1 is the bounding box in page space.
+	// X0, Y0, X1, Y1 is the bounding box in page space of the whole image.
 	X0, Y0, X1, Y1 float64
-	Inline         bool
+	// VX0, VY0, VX1, VY1 is the part of that box inside the clipping path,
+	// which is the part that shows. Hidden reports that there is none.
+	// Clipping paths are approximated by their bounding boxes, so this errs
+	// on the side of showing more.
+	VX0, VY0, VX1, VY1 float64
+	Hidden             bool
+	// Stream is the image XObject. It is nil for an inline image.
+	Stream *pdfobj.Stream
+	// Inline reports an image written into the content stream itself. Dict
+	// is then its dictionary, with the abbreviations of inline images
+	// written out and a colour space named in the resources looked up, and
+	// Data its data, still encoded. Data is part of the content stream and
+	// is only valid during the call to the sink: copy it to keep it.
+	Inline bool
+	Dict   pdfobj.Dict
+	Data   []byte
 }
 
 // Rule is a horizontal or vertical line in page space. For a horizontal
@@ -419,20 +434,25 @@ func (in *Interp) exec(op string, args []pdfobj.Object, p *pdfobj.Parser, res *r
 		}
 	case "BI":
 		// The image dictionary follows as operands, then ID, the data, EI.
+		var entries []pdfobj.Object
 		for {
-			_, next, err := p.ContentNext()
+			obj, next, err := p.ContentNext()
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				return
 			}
 			if next == "ID" {
-				p.SkipInlineImage()
+				dict := in.inlineDict(entries, res)
+				in.image(Image{Inline: true, Dict: dict, Data: p.InlineImage(in.inlineSize(dict))})
 				break
 			}
 			if next == "EI" {
+				in.image(Image{Inline: true, Dict: in.inlineDict(entries, res)})
 				break
 			}
+			if err == nil && next == "" && len(entries) < maxOperands {
+				entries = append(entries, obj)
+			}
 		}
-		in.image(true)
 
 	// Marked content.
 	case "BMC":
@@ -698,21 +718,136 @@ func finite(vs ...float64) bool {
 }
 
 // image reports an image drawn in the unit square of the current matrix.
-func (in *Interp) image(inline bool) {
+func (in *Interp) image(img Image) {
 	if in.sink.Image == nil {
 		return
 	}
 	m := in.gs.ctm
 	xs := [4]float64{m[4], m[0] + m[4], m[2] + m[4], m[0] + m[2] + m[4]}
 	ys := [4]float64{m[5], m[1] + m[5], m[3] + m[5], m[1] + m[3] + m[5]}
-	img := Image{X0: xs[0], Y0: ys[0], X1: xs[0], Y1: ys[0], Inline: inline}
+	img.X0, img.Y0, img.X1, img.Y1 = xs[0], ys[0], xs[0], ys[0]
 	for i := 1; i < 4; i++ {
 		img.X0, img.X1 = math.Min(img.X0, xs[i]), math.Max(img.X1, xs[i])
 		img.Y0, img.Y1 = math.Min(img.Y0, ys[i]), math.Max(img.Y1, ys[i])
 	}
-	if finite(img.X0, img.Y0, img.X1, img.Y1) {
-		in.sink.Image(img)
+	if !finite(img.X0, img.Y0, img.X1, img.Y1) {
+		return
 	}
+	img.VX0, img.VY0, img.VX1, img.VY1 = img.X0, img.Y0, img.X1, img.Y1
+	if c := in.gs.clip; c.set {
+		img.VX0, img.VY0 = math.Max(img.X0, c.x0), math.Max(img.Y0, c.y0)
+		img.VX1, img.VY1 = math.Min(img.X1, c.x1), math.Min(img.Y1, c.y1)
+		if img.VX1 <= img.VX0 || img.VY1 <= img.VY0 {
+			img.Hidden = true
+			img.VX0, img.VY0, img.VX1, img.VY1 = img.X0, img.Y0, img.X0, img.Y0
+		}
+	}
+	in.sink.Image(img)
+}
+
+// The dictionary of an inline image may abbreviate its keys, the names of
+// its filters and the names of the device colour spaces.
+var (
+	inlineKeys = map[pdfobj.Name]pdfobj.Name{
+		"BPC": "BitsPerComponent", "CS": "ColorSpace", "D": "Decode", "DP": "DecodeParms", "F": "Filter",
+		"H": "Height", "IM": "ImageMask", "I": "Interpolate", "W": "Width",
+	}
+	inlineFilters = map[pdfobj.Name]pdfobj.Name{
+		"AHx": "ASCIIHexDecode", "A85": "ASCII85Decode", "LZW": "LZWDecode", "Fl": "FlateDecode",
+		"RL": "RunLengthDecode", "CCF": "CCITTFaxDecode", "DCT": "DCTDecode",
+	}
+	inlineSpaces = map[pdfobj.Name]pdfobj.Name{
+		"G": "DeviceGray", "RGB": "DeviceRGB", "CMYK": "DeviceCMYK", "I": "Indexed",
+	}
+)
+
+// inlineDict builds the dictionary of an inline image from the keys and
+// values between BI and ID, in the terms of an image XObject.
+func (in *Interp) inlineDict(entries []pdfobj.Object, res *resources) pdfobj.Dict {
+	dict := pdfobj.Dict{}
+	for i := 0; i+1 < len(entries); i += 2 {
+		key, ok := entries[i].(pdfobj.Name)
+		if !ok {
+			break
+		}
+		if full, ok := inlineKeys[key]; ok {
+			key = full
+		}
+		dict[key] = entries[i+1]
+	}
+	full := func(o pdfobj.Object, names map[pdfobj.Name]pdfobj.Name) pdfobj.Object {
+		if name, ok := o.(pdfobj.Name); ok {
+			if long, ok := names[name]; ok {
+				return long
+			}
+		}
+		return o
+	}
+	switch v := dict["Filter"].(type) {
+	case pdfobj.Name:
+		dict["Filter"] = full(v, inlineFilters)
+	case pdfobj.Array:
+		filters := make(pdfobj.Array, len(v))
+		for i, name := range v {
+			filters[i] = full(name, inlineFilters)
+		}
+		dict["Filter"] = filters
+	}
+	switch v := dict["ColorSpace"].(type) {
+	case pdfobj.Name:
+		if long, ok := inlineSpaces[v]; ok {
+			dict["ColorSpace"] = long
+		} else if named := in.f.Dict(in.ctx, res.dict["ColorSpace"])[v]; named != nil {
+			// Any other name is that of a colour space in the resources.
+			dict["ColorSpace"] = named
+		}
+	case pdfobj.Array:
+		// An indexed space, written out: its base may be abbreviated too.
+		space := make(pdfobj.Array, len(v))
+		copy(space, v)
+		for i := 0; i < len(space) && i < 2; i++ {
+			space[i] = full(space[i], inlineSpaces)
+		}
+		dict["ColorSpace"] = space
+	}
+	return dict
+}
+
+// inlineSize returns the length of the data of an inline image when its
+// dictionary settles it: an image with no filter, of a device colour space
+// or an indexed one. It returns -1 when the data has to be searched for its
+// end.
+func (in *Interp) inlineSize(dict pdfobj.Dict) int {
+	if dict["Filter"] != nil {
+		return -1
+	}
+	w, _ := pdfobj.Int(dict["Width"])
+	h, _ := pdfobj.Int(dict["Height"])
+	bits, _ := pdfobj.Int(dict["BitsPerComponent"])
+	n := int64(0)
+	space := dict["ColorSpace"]
+	if arr, ok := space.(pdfobj.Array); ok && len(arr) > 0 {
+		space = arr[0]
+	}
+	switch space {
+	case pdfobj.Name("DeviceGray"), pdfobj.Name("Indexed"):
+		n = 1
+	case pdfobj.Name("DeviceRGB"):
+		n = 3
+	case pdfobj.Name("DeviceCMYK"):
+		n = 4
+	}
+	if mask, _ := dict["ImageMask"].(bool); mask {
+		n, bits = 1, 1
+	}
+	if w < 1 || h < 1 || w > 1<<20 || h > 1<<20 || n == 0 || bits < 1 || bits > 16 {
+		return -1
+	}
+	size := (w*n*bits + 7) / 8 * h
+	if size > 1<<30 {
+		return -1
+	}
+	return int(size)
 }
 
 func (in *Interp) xobject(o pdfobj.Object, parent *resources) {
@@ -722,7 +857,7 @@ func (in *Interp) xobject(o pdfobj.Object, parent *resources) {
 	}
 	switch in.f.Name(in.ctx, st.Dict["Subtype"]) {
 	case "Image":
-		in.image(false)
+		in.image(Image{Stream: st})
 		return
 	case "Form":
 	default:

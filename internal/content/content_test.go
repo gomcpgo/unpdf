@@ -52,7 +52,10 @@ func (fx *fixture) run(content string) ([]Glyph, []Image) {
 	var images []Image
 	in := New(fx.f, font.NewCache(fx.f), Sink{
 		Glyph: func(g *Glyph) bool { glyphs = append(glyphs, *g); return true },
-		Image: func(img Image) { images = append(images, img) },
+		Image: func(img Image) {
+			img.Data = append([]byte(nil), img.Data...) // only valid during the call
+			images = append(images, img)
+		},
 	})
 	in.Run(ctx, []byte(content), fx.res, Identity)
 	return glyphs, images
@@ -182,8 +185,88 @@ func TestFormXObjects(t *testing.T) {
 
 	// An image is reported with its box under the current matrix.
 	_, images := fx.run("q 200 0 0 100 50 60 cm /Img Do Q")
-	if len(images) != 1 || images[0] != (Image{X0: 50, Y0: 60, X1: 250, Y1: 160}) {
-		t.Errorf("images = %+v", images)
+	if len(images) != 1 || whole(images[0]) != [4]float64{50, 60, 250, 160} || visible(images[0]) != [4]float64{50, 60, 250, 160} {
+		t.Fatalf("images = %+v", images)
+	}
+	if img := images[0]; img.Stream == nil || img.Inline || img.Hidden || img.Stream.Dict["Width"] != int64(1) {
+		t.Errorf("image = %+v; want the image XObject", img)
+	}
+}
+
+func whole(img Image) [4]float64   { return [4]float64{img.X0, img.Y0, img.X1, img.Y1} }
+func visible(img Image) [4]float64 { return [4]float64{img.VX0, img.VY0, img.VX1, img.VY1} }
+
+func TestImageClipping(t *testing.T) {
+	fx := newFixture(t, func(b *pdftest.Builder) string {
+		return fmt.Sprintf("/Img %d 0 R", b.AddStream("<< /Subtype /Image /Width 1 /Height 1 >>", []byte{0}))
+	})
+	// A picture cropped by a clipping path shows only inside the path. One
+	// that lies outside it altogether does not show.
+	_, images := fx.run("q 100 100 50 50 re W n q 200 0 0 200 0 0 cm /Img Do Q q 10 0 0 10 500 500 cm /Img Do Q Q " +
+		"q 10 0 0 10 500 500 cm /Img Do Q")
+	if len(images) != 3 {
+		t.Fatalf("got %d images, want 3", len(images))
+	}
+	if whole(images[0]) != [4]float64{0, 0, 200, 200} || visible(images[0]) != [4]float64{100, 100, 150, 150} || images[0].Hidden {
+		t.Errorf("cropped image: %+v", images[0])
+	}
+	if !images[1].Hidden {
+		t.Errorf("an image outside the clipping path is not hidden: %+v", images[1])
+	}
+	if images[2].Hidden || visible(images[2]) != [4]float64{500, 500, 510, 510} {
+		t.Errorf("after the clip was popped: %+v", images[2])
+	}
+}
+
+func TestInlineImages(t *testing.T) {
+	fx := newFixture(t, nil)
+	fx.res["ColorSpace"] = pdftest.Parse("<< /Named [/ICCBased 99 0 R] >>")
+
+	// Abbreviated keys and names are written out.
+	g, images := fx.run("q 20 0 0 10 5 5 cm BI /W 2 /H 1 /BPC 8 /CS /RGB /F [/AHx /Fl] /DP [null << /Predictor 12 >>] /IM false /D [1 0] /I true ID 00ff> EI Q BT /F1 9 Tf (after) Tj ET")
+	if len(images) != 1 || text(g) != "after" {
+		t.Fatalf("got %d images and text %q", len(images), text(g))
+	}
+	img := images[0]
+	if !img.Inline || img.Stream != nil || whole(img) != [4]float64{5, 5, 25, 15} {
+		t.Errorf("inline image: %+v", img)
+	}
+	want := pdftest.Parse("<< /Width 2 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceRGB /Filter [/ASCIIHexDecode /FlateDecode] " +
+		"/DecodeParms [null << /Predictor 12 >>] /ImageMask false /Decode [1 0] /Interpolate true >>")
+	if got := string(pdftest.Serialize(img.Dict)); got != string(pdftest.Serialize(want)) {
+		t.Errorf("dictionary:\n got %s\nwant %s", got, pdftest.Serialize(want))
+	}
+	if string(img.Data) != "00ff> " { // a space before EI may be data; an end of line is not
+		t.Errorf("data = %q", img.Data)
+	}
+
+	// An indexed space written out, and a space named in the resources.
+	_, images = fx.run("BI /W 1 /H 1 /BPC 8 /CS [/I /RGB 1 <000000ffffff>] ID \x01 EI BI /W 1 /H 1 /BPC 8 /CS /Named ID \x01\x02\x03 EI")
+	if len(images) != 2 {
+		t.Fatalf("got %d images, want 2", len(images))
+	}
+	if got := string(pdftest.Serialize(images[0].Dict["ColorSpace"])); got != "[/Indexed /DeviceRGB 1 <000000FFFFFF>]" {
+		t.Errorf("indexed space = %s", got)
+	}
+	if got := string(pdftest.Serialize(images[1].Dict["ColorSpace"])); got != "[/ICCBased 99 0 R]" {
+		t.Errorf("named space = %s", got)
+	}
+
+	// The data of an image with no filter has a known length, so bytes
+	// that look like its end do not end it.
+	_, images = fx.run("BI /W 4 /H 3 /BPC 8 /CS /G ID ab EI cd EI!\nEI BI /W 1 /H 1 /IM true ID \x80 EI")
+	if len(images) != 2 || string(images[0].Data) != "ab EI cd EI!" || string(images[1].Data) != "\x80" {
+		t.Errorf("images of known length: %+v", images)
+	}
+	// When the length is wrong, the end is searched for.
+	_, images = fx.run("BI /W 40 /H 3 /BPC 8 /CS /G ID abc\r\nEI BT ET BI /W 40 /H 3 /BPC 8 /CS /G ID abc\n\nEI")
+	if len(images) != 2 || string(images[0].Data) != "abc" || string(images[1].Data) != "abc\n" {
+		t.Errorf("image of wrong length: %+v", images)
+	}
+	// A dictionary cut short, and one with no data.
+	_, images = fx.run("BI /W 1 /H EI BI /W 3 ID")
+	if len(images) != 2 || images[0].Dict["Width"] != int64(1) || len(images[1].Data) != 0 {
+		t.Errorf("damaged inline images: %+v", images)
 	}
 }
 
