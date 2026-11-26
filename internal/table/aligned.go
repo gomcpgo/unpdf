@@ -4,7 +4,9 @@
 package table
 
 import (
+	"cmp"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -228,6 +230,239 @@ func candidates(words []Word, lines []Line) []bool {
 	return named
 }
 
+// figureRow reports whether a line is a row of figures: after its first
+// cell it holds figures, currency signs and dashes only, and a figure among
+// them.
+func figureRow(words []Word, l Line) bool {
+	starts := cellStarts(words, l)
+	if len(starts) < 2 {
+		return false
+	}
+	figures := false
+	for _, i := range l.Words {
+		w := words[i]
+		if w.X0 < starts[1] {
+			continue
+		}
+		if !figureish(w.Text) {
+			return false
+		}
+		figures = figures || isNumeric(w.Text)
+	}
+	return figures
+}
+
+// figureish reports a figure, a currency sign or a dash: what a cell of
+// figures holds.
+func figureish(s string) bool {
+	return isNumeric(s) || isAmount(s) || isDash(s)
+}
+
+// splitFigures parts the columns of figures that no white gap parts.
+// Headings centred over narrow columns, and phrases over a group of them,
+// can cover the white space between the columns, and so can currency signs
+// set between them. But figures are set flush right, so the right edges of
+// a column's figures line up, whatever stands above them. A column that
+// holds figures in the main, and two or more such edges each shared by
+// several lines, is that many columns, parted just to the right of each
+// edge but the last. A currency sign set before the next figure then falls
+// into that figure's column, where it belongs. Only lines of a table whose
+// white space shows some columns are parted further.
+//
+// It returns the separators, and for each whether it was found here.
+func splitFigures(words []Word, lines []Line, seps []float64, x0, x1, size float64) ([]float64, []bool) {
+	if len(seps) == 0 {
+		// White space shows no columns at all: no table to part further.
+		return seps, nil
+	}
+	bounds := make([]float64, 0, len(seps)+2)
+	bounds = append(append(append(bounds, math.Inf(-1)), seps...), math.Inf(1))
+	var out []float64
+	var byEdges []bool
+	type edge struct {
+		x, left float64 // the edge, and where its widest figure begins
+		lines   map[int]bool
+	}
+	for c := 0; c+1 < len(bounds); c++ {
+		if c > 0 {
+			out, byEdges = append(out, bounds[c]), append(byEdges, false)
+		}
+		// The words of the column, and the right edges of its figures.
+		// It must be a column of figures: most of the lines that have a
+		// figure in it have nothing else there but currency signs and
+		// dashes, unlike "3x3 conv, 64" or a heading "December 31,".
+		var ends [][2]int // line and word of the figures of lines that hold nothing else here
+		data := map[int]bool{}
+		filled, figures := 0, 0
+		for li, l := range lines {
+			only, at := true, len(ends)
+			for _, i := range l.Words {
+				w := words[i]
+				if m := (w.X0 + w.X1) / 2; m < bounds[c] || m >= bounds[c+1] {
+					continue
+				}
+				switch {
+				case isFigure(w.Text):
+					ends = append(ends, [2]int{li, i})
+					data[li] = true
+				case !isAmount(w.Text) && !isDash(w.Text):
+					only = false
+				}
+			}
+			if data[li] {
+				filled++
+				if only {
+					figures++
+				} else {
+					ends = ends[:at] // "18 years": no edge of a figure
+				}
+			}
+		}
+		if len(ends) < 4 || figures*3 < filled*2 {
+			continue
+		}
+		sort.Slice(ends, func(a, b int) bool { return words[ends[a][1]].X1 < words[ends[b][1]].X1 })
+		// Edges a closing bracket's width apart are one: negative figures
+		// in brackets hang the bracket past the edge.
+		var edges []edge
+		for _, e := range ends {
+			w := words[e[1]]
+			if n := len(edges); n > 0 && w.X1-edges[n-1].x <= 0.5*size {
+				edges[n-1].x = w.X1
+				edges[n-1].left = math.Min(edges[n-1].left, w.X0)
+				edges[n-1].lines[e[0]] = true
+				continue
+			}
+			edges = append(edges, edge{w.X1, w.X0, map[int]bool{e[0]: true}})
+		}
+		need := max(2, min(3, len(data)/2))
+		var kept []edge
+		for _, e := range edges {
+			if len(e.lines) >= need {
+				kept = append(kept, e)
+			}
+		}
+		for k := 1; k < len(kept); k++ {
+			if kept[k].left-kept[k-1].x < 0.6*size {
+				continue
+			}
+			// Just to the right of the edge, or of a figure that hangs
+			// past it ("2020*" over its column): the first place before
+			// the next column's figures that no figure of a cell of
+			// figures stands across. Words may, and figures among words
+			// ("for 2014 – 2023 accident years"): the headings and labels
+			// set across the columns.
+			places := []float64{kept[k-1].x}
+			for _, e := range ends {
+				if w := words[e[1]]; w.X1 > kept[k-1].x && w.X1 < kept[k].left {
+					places = append(places, w.X1)
+				}
+			}
+			slices.Sort(places)
+			for _, x := range places {
+				at := x + 0.25*size
+				if at >= kept[k].left {
+					break
+				}
+				across := false
+				for _, e := range ends {
+					w := words[e[1]]
+					across = across || (w.X0 < at && w.X1 > at)
+				}
+				if !across {
+					out, byEdges = append(out, at), append(byEdges, true)
+					break
+				}
+			}
+		}
+	}
+	return out, byEdges
+}
+
+// runsOnAcross reports whether two words next to each other on a line read
+// on as a phrase across columns that only the edges of figures part: the
+// space between them is a space between words, and they are not two
+// figures.
+func runsOnAcross(words []Word, a, b int, byEdges []bool, from, to int) bool {
+	wa, wb := words[a], words[b]
+	if isFigure(wa.Text) && isFigure(wb.Text) {
+		return false
+	}
+	if gap := wb.X0 - wa.X1; gap < -1 || gap > 0.5*math.Max(wa.Size, wb.Size) {
+		return false
+	}
+	for k := from; k < to; k++ {
+		if !byEdges[k] {
+			return false
+		}
+	}
+	return true
+}
+
+// signsBefore reports whether a table sets its currency signs before the
+// figures they belong to: some cell begins with a sign and holds a figure,
+// or a cell that holds only a sign, after one that does not end in a
+// figure, stands before a cell that begins with one. Tables that write
+// "12,50 €" do neither.
+func signsBefore(words []Word, rows []row) bool {
+	sorted := func(idx []int) []int {
+		out := slices.Clone(idx)
+		slices.SortFunc(out, func(a, b int) int { return cmp.Compare(words[a].X0, words[b].X0) })
+		return out
+	}
+	for _, rw := range rows {
+		for c, idx := range rw.cells {
+			if len(idx) == 0 {
+				continue
+			}
+			ws := sorted(idx)
+			if !isAmount(words[ws[0]].Text) || isNumeric(words[ws[0]].Text) {
+				continue
+			}
+			if len(ws) > 1 && isNumeric(words[ws[1]].Text) {
+				return true
+			}
+			if len(ws) == 1 && c+1 < len(rw.cells) && len(rw.cells[c+1]) > 0 && isNumeric(words[sorted(rw.cells[c+1])[0]].Text) {
+				if c == 0 || len(rw.cells[c-1]) == 0 || !isNumeric(words[sorted(rw.cells[c-1])[len(rw.cells[c-1])-1]].Text) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// moveSigns moves a currency sign at the end of a cell of figures to the
+// start of the next cell, in a table that sets its signs before the
+// figures. Financial tables set the sign of each amount apart, and often
+// nearer to the amount on its left than to its own.
+func moveSigns(words []Word, cells [][]int) {
+	for c := 0; c+1 < len(cells); c++ {
+		idx := cells[c]
+		if len(idx) < 2 {
+			continue
+		}
+		last, figures := idx[0], true
+		for _, i := range idx {
+			if words[i].X1 > words[last].X1 {
+				last = i
+			}
+			figures = figures && figureish(words[i].Text)
+		}
+		if !figures || isNumeric(words[last].Text) || !isAmount(words[last].Text) {
+			continue
+		}
+		kept := make([]int, 0, len(idx)-1)
+		for _, i := range idx {
+			if i != last {
+				kept = append(kept, i)
+			}
+		}
+		cells[c] = kept
+		cells[c+1] = append([]int{last}, cells[c+1]...)
+	}
+}
+
 // cellStarts returns where each cell of a line begins: the left edge of
 // the line and of every word that follows a gap wide enough to part cells.
 func cellStarts(words []Word, l Line) []float64 {
@@ -434,11 +669,24 @@ func align(words []Word, lines []Line, hs []hline) (Table, bool) {
 			gapLines = append(gapLines, l)
 		}
 	}
-	seps := separators(words, gapLines, x0, x1, size)
+	seps, byEdges := splitFigures(words, gapLines, separators(words, gapLines, x0, x1, size), x0, x1, size)
 	if len(seps) == 0 || len(seps) > 60 {
 		return Table{}, false
 	}
 	cols := len(seps) + 1
+	edged := 0 // columns told apart by the edges of their figures
+	for _, e := range byEdges {
+		if e {
+			edged++
+		}
+	}
+	head := len(lines) // the lines above the first row of figures
+	for li, l := range lines {
+		if figureRow(words, l) {
+			head = li
+			break
+		}
+	}
 
 	// The cells of each line.
 	rows := make([]row, len(lines))
@@ -448,8 +696,11 @@ func align(words []Word, lines []Line, hs []hline) (Table, bool) {
 		crosses := false
 		for _, i := range l.Words {
 			w := words[i]
-			for _, s := range seps {
-				crosses = crosses || (w.X0 < s && w.X1 > s)
+			for k, s := range seps {
+				// The edges of figures part figures only. A heading over a
+				// group of columns, or a label set across them, may run
+				// across them, as it should.
+				crosses = crosses || (w.X0 < s && w.X1 > s && !byEdges[k])
 			}
 		}
 		at := -1 // the one cell of a line that names a group of rows
@@ -457,18 +708,32 @@ func align(words []Word, lines []Line, hs []hline) (Table, bool) {
 			w := words[l.Words[0]]
 			at = sort.SearchFloat64s(seps, (w.X0+w.X1)/2)
 		}
+		prev, prevCell := -1, -1 // the word before, and its cell
 		for _, i := range l.Words {
 			c := at
 			if c < 0 {
 				w := words[i]
 				c = sort.SearchFloat64s(seps, (w.X0+w.X1)/2)
+				// Below the header, a phrase set across the edges of
+				// figures, such as a label for a total, stays one cell.
+				// The header's phrases are joined later, as headings of
+				// groups of columns.
+				if prev >= 0 && li >= head && c > prevCell && runsOnAcross(words, prev, i, byEdges, prevCell, c) {
+					c = prevCell
+				}
 			}
 			cells[c] = append(cells[c], i)
+			prev, prevCell = i, c
 		}
 		if crosses {
 			spanning++
 		}
 		rows[li] = row{cells, l.Y0, l.Y1}
+	}
+	if signsBefore(words, rows) {
+		for _, rw := range rows {
+			moveSigns(words, rw.cells)
+		}
 	}
 	rows, cols = mergeAffixes(words, rows, cols)
 	if cols < 2 {
@@ -601,10 +866,13 @@ func align(words []Word, lines []Line, hs []hline) (Table, bool) {
 		// Prose in columns with nothing to mark the rows; a numbered list
 		// with its numbers set apart; a table of contents.
 		conf = math.Min(conf, 0.3)
-	case well*2 < lineCount, lineCount < 5 && well < lineCount && bounding < 2, cols == 2 && !figures && bounding < 2:
+	case well*2 < lineCount && edged < 2, lineCount < 5 && well < lineCount && bounding < 2, cols == 2 && !figures && bounding < 2:
 		// Too ragged; or small, not full and not ruled off, like the
 		// labels of a chart; or two columns of words with nothing else to
-		// say it is a table: labels and their values, most often.
+		// say it is a table: labels and their values, most often. A
+		// triangle of figures, each row a figure longer than the last, is
+		// ragged by nature: columns told apart by the edges their figures
+		// share show it is a table all the same.
 		conf = math.Min(conf, 0.45)
 	}
 	t.Confidence = math.Max(0.1, conf)
