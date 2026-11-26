@@ -89,6 +89,44 @@ func TestRuledTable(t *testing.T) {
 	}
 }
 
+func TestRuledHeadingsThatRepeatFromPageToPage(t *testing.T) {
+	// Tables of one layout on pages that follow each other, high on the
+	// page: their headings repeat in the same place, as a running head
+	// does. Inside the rules they are the table's all the same. A box
+	// drawn round the running head itself is no table.
+	head := "0.5 w 72 770 m 540 770 l S 72 750 m 540 750 l S 72 750 m 72 770 l S 400 750 m 400 770 l S 540 750 m 540 770 l S " +
+		cells(756, 76, "Annual Data Book", 404, "Download")
+	grid := "0.5 w 72 735 m 372 735 l S 72 715 m 372 715 l S 72 695 m 372 695 l S 72 675 m 372 675 l S " +
+		"72 675 m 72 735 l S 172 675 m 172 735 l S 272 675 m 272 735 l S 372 675 m 372 735 l S "
+	var pages []string
+	for n := 1; n <= 5; n++ {
+		pages = append(pages, head+grid+cells(721, 76, "Year", 176, "Exports", 276, "Imports")+
+			cells(701, 76, fmt.Sprint(2000+2*n), 176, fmt.Sprint(100+n), 276, fmt.Sprint(200+n))+
+			cells(681, 76, fmt.Sprint(2001+2*n), 176, fmt.Sprint(300+n), 276, fmt.Sprint(400+n))+
+			fmt.Sprintf(wrapped, 600))
+	}
+	doc := pagesOf(t, pages...)
+	p, _ := doc.Page(ctx, 3)
+	blocks, _ := p.Blocks(ctx)
+	furniture := 0
+	for _, b := range blocks {
+		if b.Furniture {
+			furniture++
+		}
+	}
+	if furniture < 2 {
+		t.Fatalf("%d blocks of furniture: the test needs the head and the headings to repeat", furniture)
+	}
+	tables, err := p.Tables(ctx)
+	if err != nil || len(tables) != 1 {
+		t.Fatalf("tables = %+v, %v", tables, err)
+	}
+	want := [][]string{{"Year", "Exports", "Imports"}, {"2006", "103", "203"}, {"2007", "303", "403"}}
+	if got := tables[0].Grid(); !reflect.DeepEqual(got, want) {
+		t.Errorf("grid = %q", got)
+	}
+}
+
 func TestTableOnRotatedPage(t *testing.T) {
 	b := pdftest.New()
 	res := fmt.Sprintf("<< /Font << /F1 %d 0 R >> >>", b.Add(helvetica))

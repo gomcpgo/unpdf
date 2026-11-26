@@ -280,6 +280,179 @@ func TestAlignedRows(t *testing.T) {
 	}
 }
 
+func TestAlignedGroupNamedOverTheFigures(t *testing.T) {
+	// A line under the first row names the rows that follow. It is set
+	// over the columns of figures, not under the labels, and runs across
+	// the gaps between them. The columns are still told apart, and the
+	// line is one cell.
+	p := &page{}
+	p.text(100, 50, "Total", 78, "...........", 160, "48 200", 210, "3 650", 260, "310", 310, "52 160")
+	p.text(115, 160, "by kind of proceedings")
+	p.text(130, 50, "Opened", 88, "........", 160, "48 200", 210, "X", 260, "X", 310, "48 200")
+	p.text(145, 50, "Closed", 88, "........", 160, "X", 210, "3 650", 260, "310", 310, "3 960")
+	if l := p.lines[1]; l.X1 < 260 {
+		t.Fatalf("the line ends at %.0f, short of the third column of figures", l.X1)
+	}
+	tables, _ := Aligned(p.words, p.lines, nil)
+	if len(tables) != 1 {
+		t.Fatalf("%d tables", len(tables))
+	}
+	want := [][]string{
+		{"Total ...........", "48 200", "3 650", "310", "52 160"},
+		{"", "by kind of proceedings", "", "", ""},
+		{"Opened ........", "48 200", "X", "X", "48 200"},
+		{"Closed ........", "X", "3 650", "310", "3 960"},
+	}
+	if got := rowsOf(tables[0]); !same(got, want) {
+		t.Errorf("rows = %q", got)
+	}
+}
+
+func TestAlignedTotalUnderTheRows(t *testing.T) {
+	// The total has no label and is set close under the last row, which
+	// leaves two of its columns empty. It is a row of its own all the
+	// same: the row above already has its figures in those cells.
+	p := &page{}
+	p.text(100, 50, "Investment", 200, "2023", 260, "2022", 320, "2023", 380, "2022")
+	p.text(115, 50, "Kraft Heinz", 200, "13,230", 260, "12,937", 320, "12,035", 380, "13,249")
+	p.text(130, 50, "Occidental", 200, "15,410", 260, "11,484", 320, "14,552", 380, "12,242")
+	p.text(141, 50, "Other", 200, "426", 260, "3,629")
+	p.text(152, 200, "29,066", 260, "28,050")
+	tables, _ := Aligned(p.words, p.lines, nil)
+	if len(tables) != 1 {
+		t.Fatalf("%d tables", len(tables))
+	}
+	want := [][]string{
+		{"Investment", "2023", "2022", "2023", "2022"},
+		{"Kraft Heinz", "13,230", "12,937", "12,035", "13,249"},
+		{"Occidental", "15,410", "11,484", "14,552", "12,242"},
+		{"Other", "426", "3,629", "", ""},
+		{"", "29,066", "28,050", "", ""},
+	}
+	if got := rowsOf(tables[0]); !same(got, want) {
+		t.Errorf("rows = %q", got)
+	}
+}
+
+func TestAlignedColumnsByTheEdgesOfFigures(t *testing.T) {
+	// A heading over two columns and the years centred over them cover
+	// the white space between the columns, but the figures under each
+	// year share their right edge. Each "$" stands before its figure.
+	p := &page{}
+	p.text(100, 230, "Carrying Value", 330, "Fair Value")
+	p.text(112, 215, "2023", 265, "2022", 315, "2023", 365, "2022")
+	p.text(127, 50, "Kraft Heinz", 208, "$", 220, "13,230", 258, "$", 270, "12,937", 308, "$", 320, "12,035", 358, "$", 370, "13,249")
+	p.text(142, 50, "Occidental", 220, "15,410", 270, "11,484", 320, "14,552", 370, "12,242")
+	p.text(157, 50, "Other", 235, "426", 275, "3,629")
+	p.text(172, 50, "Total", 208, "$", 220, "29,066", 258, "$", 270, "28,050")
+	tables, _ := Aligned(p.words, p.lines, nil)
+	if len(tables) != 1 {
+		t.Fatalf("%d tables", len(tables))
+	}
+	got := rowsOf(tables[0])
+	want := [][]string{
+		{"Kraft Heinz", "$ 13,230", "$ 12,937", "$ 12,035", "$ 13,249"},
+		{"Occidental", "15,410", "11,484", "14,552", "12,242"},
+		{"Other", "426", "3,629", "", ""},
+		{"Total", "$ 29,066", "$ 28,050", "", ""},
+	}
+	if tables[0].Cols != 5 || len(got) < 4 || !same(got[len(got)-4:], want) {
+		t.Errorf("%d columns, rows = %q", tables[0].Cols, got)
+	}
+}
+
+func TestAlignedSignNearerTheFigureBefore(t *testing.T) {
+	// The white space parts the columns, but each "$" is set nearer to
+	// the figure on its left than to its own.
+	p := &page{}
+	p.text(100, 225, "2023", 310, "2022", 385, "2021")
+	p.text(115, 50, "Net earnings", 200, "$", 215, "97,147", 250, "$", 290, "(21,998)", 335, "$", 375, "90,949")
+	p.text(130, 50, "Other income", 220, "1,318", 305, "3,010", 380, "1,889")
+	p.text(145, 50, "Comprehensive", 215, "98,465", 290, "(18,988)", 375, "92,838")
+	tables, _ := Aligned(p.words, p.lines, nil)
+	if len(tables) != 1 {
+		t.Fatalf("%d tables", len(tables))
+	}
+	want := [][]string{
+		{"", "2023", "2022", "2021"},
+		{"Net earnings", "$ 97,147", "$ (21,998)", "$ 90,949"},
+		{"Other income", "1,318", "3,010", "1,889"},
+		{"Comprehensive", "98,465", "(18,988)", "92,838"},
+	}
+	if got := rowsOf(tables[0]); !same(got, want) {
+		t.Errorf("rows = %q", got)
+	}
+
+	// Where the signs follow the figures, they stay.
+	p = &page{}
+	p.text(100, 50, "Artikel", 200, "Preis", 280, "Summe")
+	p.text(115, 50, "Lager", 200, "12,50", 230, "€", 280, "25,00", 310, "€")
+	p.text(130, 50, "Schraube", 205, "1,50", 230, "€", 285, "3,00", 310, "€")
+	p.text(145, 50, "Mutter", 205, "0,80", 230, "€", 285, "1,60", 310, "€")
+	tables, _ = Aligned(p.words, p.lines, nil)
+	want = [][]string{
+		{"Artikel", "Preis", "Summe"},
+		{"Lager", "12,50 €", "25,00 €"},
+		{"Schraube", "1,50 €", "3,00 €"},
+		{"Mutter", "0,80 €", "1,60 €"},
+	}
+	if len(tables) != 1 || !same(rowsOf(tables[0]), want) {
+		t.Errorf("signs after: %d tables, rows = %q", len(tables), rowsOf(tables[0]))
+	}
+}
+
+func TestAlignedEdgesOnlyOfFigures(t *testing.T) {
+	// Cells of words with a figure in them, as the boxes of a diagram
+	// have, share right edges too. They are not columns of figures.
+	p := &page{}
+	for i, y := range []float64{100, 115, 130, 145} {
+		size := []string{"64", "128", "256", "512"}[i]
+		p.text(y, 50, "pool", 200, "3x3 conv, "+size, 300, "3x3 conv, "+size)
+	}
+	tables, _ := Aligned(p.words, p.lines, nil)
+	if len(tables) != 1 || tables[0].Cols != 3 {
+		t.Fatalf("%d tables, rows = %q", len(tables), rowsOf(tables[0]))
+	}
+}
+
+func TestAlignedFormulasAreNotTables(t *testing.T) {
+	conf := func(p *page) float64 {
+		t.Helper()
+		tables, _ := Aligned(p.words, p.lines, nil)
+		if len(tables) != 1 {
+			t.Fatalf("%d tables", len(tables))
+		}
+		return tables[0].Confidence
+	}
+	// A matrix whose large brackets are stacked from pieces.
+	p := &page{}
+	p.text(100, 80, "⎛", 110, "a", 150, "b", 190, "⎞")
+	p.text(112, 50, "M =", 80, "⎜", 110, "c", 150, "d", 190, "⎟")
+	p.text(124, 80, "⎝", 110, "e", 150, "f", 190, "⎠")
+	if c := conf(p); c > 0.3 {
+		t.Errorf("matrix of bracket pieces: confidence %.2f", c)
+	}
+	// Two matrices multiplied, their brackets single glyphs set apart.
+	p = &page{}
+	p.text(100, 80, "(", 110, "1", 150, "0", 190, ")", 220, "(", 250, "a", 290, "b", 330, ")")
+	p.text(112, 80, "", 110, "0", 150, "1", 190, "·", 250, "c", 290, "d")
+	p.text(124, 80, "(", 110, "0", 150, "1", 190, ")", 220, "(", 250, "c", 290, "d", 330, ")")
+	if c := conf(p); c > 0.3 {
+		t.Errorf("matrices in brackets: confidence %.2f", c)
+	}
+	// A table that marks cells with no figure with a minus sign is a
+	// table all the same.
+	p = &page{}
+	p.text(100, 50, "Fuel", 200, "2022", 260, "2023")
+	p.text(115, 50, "Coal", 200, "−", 260, "12")
+	p.text(130, 50, "Gas", 200, "−", 260, "7")
+	p.text(145, 50, "Oil", 200, "4", 260, "−")
+	p.text(160, 50, "Wind", 200, "9", 260, "11")
+	if c := conf(p); c < 0.5 {
+		t.Errorf("table with minus signs for no figure: confidence %.2f", c)
+	}
+}
+
 func TestAlignedProseInColumns(t *testing.T) {
 	// Two columns of prose that wraps. With rules between the rows they
 	// are rows of a table; without, nothing says where a row ends.
