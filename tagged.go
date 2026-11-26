@@ -576,8 +576,13 @@ func (p *Page) taggedTables(laid []layout.Block) []Table {
 			table.Box.X1, table.Box.Y1 = max(table.Box.X1, c.box.X1), max(table.Box.Y1, c.box.Y1)
 			col += colSpan
 		}
-		if table.HeaderRows == table.Rows {
+		switch {
+		case table.HeaderRows == table.Rows:
 			table.HeaderRows = 0 // every row a heading: no word on which are
+		case table.HeaderRows*2 > table.Rows:
+			// Most rows tagged as headings, which some producers do to all
+			// rows but the last: the first is the one to believe.
+			table.HeaderRows = 1
 		}
 		// A title and notes tagged as rows of the table are text around it.
 		// Their places are looked up before the cells are moved about.

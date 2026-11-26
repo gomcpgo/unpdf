@@ -248,6 +248,28 @@ func TestDamagedTags(t *testing.T) {
 	}
 }
 
+func TestTaggedHeaderRowsMustBeFew(t *testing.T) {
+	// Some producers tag every row but the last as headings. The second
+	// row of this table is tagged like the first, which makes two rows of
+	// three: only the first is believed.
+	doc := taggedDoc(t, "<< /Marked true >>", "", func(b *pdftest.Builder, e map[string]int) {
+		b.Set(e["td1"], fmt.Sprintf("<< /Type /StructElem /S /TH /P %d 0 R /K 8 >>", e["r2"]))
+		b.Set(e["td2"], fmt.Sprintf("<< /Type /StructElem /S /TH /P %d 0 R /K [] >>", e["r2"]))
+		b.Set(e["td3"], fmt.Sprintf("<< /Type /StructElem /S /TH /P %d 0 R /K 9 >>", e["r2"]))
+	})
+	p, _ := doc.Page(ctx, 1)
+	tables, err := p.Tables(ctx)
+	if err != nil || len(tables) != 1 {
+		t.Fatalf("tables = %+v, %v", tables, err)
+	}
+	if tb := tables[0]; tb.Rows != 3 || tb.HeaderRows != 1 {
+		t.Errorf("%d rows, %d header rows", tb.Rows, tb.HeaderRows)
+	}
+	if got := tables[0].Markdown(); !strings.HasPrefix(got, "| Team | Start | End |\n| --- | --- | --- |\n| Support |") {
+		t.Errorf("Markdown:\n%s", got)
+	}
+}
+
 func TestHeadingNumber(t *testing.T) {
 	for role, want := range map[string]int{"H1": 1, "H6": 6, "H12": 12, "H": 0, "H0": 0, "Hx": 0, "H123": 0, "P": 0, "": 0, "TH": 0} {
 		if got := headingNumber(role); got != want {

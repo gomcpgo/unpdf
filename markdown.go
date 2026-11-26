@@ -44,8 +44,9 @@ type MarkdownOptions struct {
 // larger or bolder than the body text, or one that matches an entry of the
 // document outline; its level follows its size. A table is shown as a table
 // when Page.Tables finds it with a confidence of at least 0.5, and as lines
-// of text otherwise. Its first row becomes the header row. A table that
-// runs on over a page break is continued under the same header.
+// of text otherwise. Its header rows, or its first row where they are not
+// known, become the header row: see Table.Markdown. A table that runs on
+// over a page break is continued under the same header.
 func (d *Document) Markdown(ctx context.Context, opts MarkdownOptions) (string, error) {
 	var b strings.Builder
 	if err := d.WriteMarkdown(ctx, &b, opts); err != nil {
@@ -167,15 +168,16 @@ type tableTail struct {
 	width   float64
 }
 
-// continues reports whether rows, the table a page starts with, carries on
-// the table the page before ended with: the same number of columns, about
-// the same width, and a first row that either repeats the header or holds
-// figures where the row before the break held figures.
-func (t *tableTail) continues(rows [][]string, width float64) (repeated, ok bool) {
+// continues reports whether the table a page starts with, given by its
+// header and by all its rows, carries on the table the page before ended
+// with: the same number of columns, about the same width, and either the
+// same header again or a first row that holds figures where the row before
+// the break held figures.
+func (t *tableTail) continues(header []string, rows [][]string, width float64) (repeated, ok bool) {
 	if t == nil || len(rows) == 0 || len(rows[0]) != len(t.header) || math.Abs(width-t.width) > 0.05*t.width {
 		return false, false
 	}
-	if slices.Equal(rows[0], t.header) {
+	if slices.Equal(header, t.header) {
 		return true, true
 	}
 	same, figures := 0, 0
@@ -262,14 +264,16 @@ func (p *Page) markdown(ctx context.Context, opts MarkdownOptions, carry *tableT
 		wrote, prevList, tail = true, list, nil
 	}
 	writeTable := func(t *Table) {
-		rows := t.rows()
-		if len(rows) == 0 {
+		header, body := t.headed()
+		if header == nil {
 			return
 		}
+		// Every row as it stands, for a part of a table that goes on from
+		// the page before and has no header of its own.
+		rows := t.rows()
 		width := t.Box.X1 - t.Box.X0
-		header, body := rows[0], rows[1:]
 		text := ""
-		if repeated, ok := carry.continues(rows, width); ok && !wrote {
+		if repeated, ok := carry.continues(header, rows, width); ok && !wrote {
 			// The table the page before ended with goes on here.
 			header = carry.header
 			if !repeated {

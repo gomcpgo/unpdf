@@ -257,7 +257,7 @@ func grid(words []Word, hs []hline, vs []vline) (Table, bool) {
 		return Table{}, false
 	}
 	// Rows that no rule separates: see splitBands.
-	ys, virtual := splitBands(words, xs, ys)
+	ys, virtual, figureRows := splitBands(words, xs, ys)
 	rows, cols := len(ys)-1, len(xs)-1
 	if rows < 1 || cols < 1 || rows*cols < 2 || rows > maxGridDim || cols > maxGridDim || rows*cols > maxGridCells {
 		return Table{}, false
@@ -492,7 +492,9 @@ func grid(words []Word, hs []hline, vs []vline) (Table, bool) {
 		}
 		return t.Cells[i].Col < t.Cells[j].Col
 	})
-	t.HeaderRows = headerRows(words, &t)
+	if t.HeaderRows = headerRows(words, &t); t.HeaderRows == 0 {
+		t.HeaderRows = headerBands(&t, figureRows)
+	}
 	return t, true
 }
 
@@ -575,8 +577,14 @@ func headerRows(words []Word, t *Table) int {
 // A band that does not keep step may still hold two rows: a line that
 // names a group ("Farm income:") above the first row of the group.
 //
-// It returns the boundaries and, for each, whether it was added here.
-func splitBands(words []Word, xs, ys []float64) ([]float64, []bool) {
+// A band of words above the first band of figures is the header: column
+// headings set over several lines keep step as rows of figures do, and are
+// lines of one row all the same. It is left whole.
+//
+// It returns the boundaries, for each whether it was added here, and for
+// each row between two boundaries whether it is one of the rows of figures
+// that a band was split into.
+func splitBands(words []Word, xs, ys []float64) ([]float64, []bool, []bool) {
 	cols := len(xs) - 1
 	type placed struct {
 		mid, top, bottom float64
@@ -602,8 +610,10 @@ func splitBands(words []Word, xs, ys []float64) ([]float64, []bool) {
 		first, last map[int]int     // leftmost and rightmost word in each column
 	}
 	mid := func(l *textLine) float64 { return (l.top + l.bottom) / 2 }
-	out := []float64{ys[0]}
-	virtual := []bool{false}
+	// For each band, the boundaries to add inside it, whether its lines
+	// keep step, and whether they hold figures.
+	inner := make([][]float64, len(bands))
+	stepped, figured := make([]bool, len(bands)), make([]bool, len(bands))
 	for r, band := range bands {
 		var lines []*textLine
 		numeric := 0
@@ -663,6 +673,7 @@ func splitBands(words []Word, xs, ys []float64) ([]float64, []bool) {
 			inStepEnough := inStep >= 2 && inStep*2 >= withText && len(band) >= 6
 			switch {
 			case inStepEnough && (k >= 3 && (figures || !wrapped) || k == 2 && figures):
+				stepped[r], figured[r] = true, figures
 				for i := 1; i < k; i++ {
 					cut[i] = true
 				}
@@ -736,12 +747,34 @@ func splitBands(words []Word, xs, ys []float64) ([]float64, []bool) {
 		}
 		for i := 1; i < k; i++ {
 			if cut[i] {
-				out = append(out, (lines[i-1].bottom+lines[i].top)/2)
-				virtual = append(virtual, true)
+				inner[r] = append(inner[r], (lines[i-1].bottom+lines[i].top)/2)
 			}
+		}
+	}
+	// The bands of words above the first band of figures are the header.
+	for r := range bands {
+		if stepped[r] && figured[r] {
+			for above := 0; above < r; above++ {
+				if stepped[above] && !figured[above] {
+					inner[above] = nil
+				}
+			}
+			break
+		}
+	}
+	out := []float64{ys[0]}
+	virtual := []bool{false}
+	var figureRows []bool
+	for r := range bands {
+		for _, y := range inner[r] {
+			out = append(out, y)
+			virtual = append(virtual, true)
 		}
 		out = append(out, ys[r+1])
 		virtual = append(virtual, false)
+		for range len(inner[r]) + 1 {
+			figureRows = append(figureRows, stepped[r] && figured[r] && len(inner[r]) > 0)
+		}
 	}
 	// Boundaries must stay in order for the searches that follow.
 	for i := 1; i < len(out); i++ {
@@ -749,7 +782,7 @@ func splitBands(words []Word, xs, ys []float64) ([]float64, []bool) {
 			out[i] = out[i-1]
 		}
 	}
-	return out, virtual
+	return out, virtual, figureRows
 }
 
 // isNumeric reports whether a cell holds a number, an amount or a
