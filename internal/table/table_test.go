@@ -415,6 +415,44 @@ func TestAlignedEdgesOnlyOfFigures(t *testing.T) {
 	}
 }
 
+func TestAlignedFormulasAreNotTables(t *testing.T) {
+	conf := func(p *page) float64 {
+		t.Helper()
+		tables, _ := Aligned(p.words, p.lines, nil)
+		if len(tables) != 1 {
+			t.Fatalf("%d tables", len(tables))
+		}
+		return tables[0].Confidence
+	}
+	// A matrix whose large brackets are stacked from pieces.
+	p := &page{}
+	p.text(100, 80, "⎛", 110, "a", 150, "b", 190, "⎞")
+	p.text(112, 50, "M =", 80, "⎜", 110, "c", 150, "d", 190, "⎟")
+	p.text(124, 80, "⎝", 110, "e", 150, "f", 190, "⎠")
+	if c := conf(p); c > 0.3 {
+		t.Errorf("matrix of bracket pieces: confidence %.2f", c)
+	}
+	// Two matrices multiplied, their brackets single glyphs set apart.
+	p = &page{}
+	p.text(100, 80, "(", 110, "1", 150, "0", 190, ")", 220, "(", 250, "a", 290, "b", 330, ")")
+	p.text(112, 80, "", 110, "0", 150, "1", 190, "·", 250, "c", 290, "d")
+	p.text(124, 80, "(", 110, "0", 150, "1", 190, ")", 220, "(", 250, "c", 290, "d", 330, ")")
+	if c := conf(p); c > 0.3 {
+		t.Errorf("matrices in brackets: confidence %.2f", c)
+	}
+	// A table that marks cells with no figure with a minus sign is a
+	// table all the same.
+	p = &page{}
+	p.text(100, 50, "Fuel", 200, "2022", 260, "2023")
+	p.text(115, 50, "Coal", 200, "−", 260, "12")
+	p.text(130, 50, "Gas", 200, "−", 260, "7")
+	p.text(145, 50, "Oil", 200, "4", 260, "−")
+	p.text(160, 50, "Wind", 200, "9", 260, "11")
+	if c := conf(p); c < 0.5 {
+		t.Errorf("table with minus signs for no figure: confidence %.2f", c)
+	}
+}
+
 func TestAlignedProseInColumns(t *testing.T) {
 	// Two columns of prose that wraps. With rules between the rows they
 	// are rows of a table; without, nothing says where a row ends.

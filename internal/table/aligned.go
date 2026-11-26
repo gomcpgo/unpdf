@@ -862,9 +862,10 @@ func align(words []Word, lines []Line, hs []hline) (Table, bool) {
 	conf -= 0.3 * float64(spanning) / float64(len(lines))
 	conf = math.Min(conf, 0.9)
 	switch {
-	case unsure || listLike(&t) || contentsLike(&t):
+	case unsure || listLike(&t) || contentsLike(&t) || formulaLike(words, &t):
 		// Prose in columns with nothing to mark the rows; a numbered list
-		// with its numbers set apart; a table of contents.
+		// with its numbers set apart; a table of contents; a matrix or a
+		// formula set in rows and columns.
 		conf = math.Min(conf, 0.3)
 	case well*2 < lineCount && edged < 2, lineCount < 5 && well < lineCount && bounding < 2, cols == 2 && !figures && bounding < 2:
 		// Too ragged; or small, not full and not ruled off, like the
@@ -1275,6 +1276,69 @@ func isDash(s string) bool {
 		return true
 	}
 	return false
+}
+
+// formulaLike reports a matrix, a vector or a formula set in rows and
+// columns: words that are pieces of the large brackets a formula is set
+// in, or cells that hold nothing but brackets and the signs of operations
+// ("(", ")", "=", "·"). The pieces of a large bracket are glyphs of their
+// own, stacked down its two sides, and make columns more regular than a
+// table's.
+func formulaLike(words []Word, t *Table) bool {
+	pieces, signs, cells, total := 0, 0, 0, 0
+	for _, c := range t.Cells {
+		if len(c.Words) == 0 {
+			continue
+		}
+		only := true
+		for _, i := range c.Words {
+			text := words[i].Text
+			total++
+			switch {
+			case strings.IndexFunc(text, bracketPiece) >= 0:
+				pieces++
+			case mathSign(text):
+				signs++
+			case text == "+" || text == "−":
+				// Signs of a formula too, but tables put them in cells
+				// that have no figure: they count, but make no cell of
+				// signs.
+				signs++
+				only = false
+			default:
+				only = false
+			}
+		}
+		if only {
+			cells++
+		}
+	}
+	return pieces >= 2 || cells >= 2 || (cells == 1 && (pieces+signs)*5 >= total)
+}
+
+// bracketPiece reports a piece of a large bracket, brace or bar, from
+// which formulas build the delimiters that span several lines. Text has
+// no use for them.
+func bracketPiece(r rune) bool {
+	return r >= '\u239b' && r <= '\u23b3'
+}
+
+// mathSign reports a word that is a bracket or the sign of an operation
+// standing alone, or such a sign beside a glyph that has no text: a large
+// bracket drawn from a font with no map to Unicode reads as "�(". A word
+// of such glyphs alone says nothing: whole tables are set in fonts that
+// have no map.
+func mathSign(s string) bool {
+	signs := 0
+	for _, r := range s {
+		switch {
+		case strings.ContainsRune("()[]{}|‖=·◦×∈⇒⇔→≤≥", r):
+			signs++
+		case r != unicode.ReplacementChar:
+			return false
+		}
+	}
+	return signs == 1 || (signs > 1 && strings.ContainsRune(s, unicode.ReplacementChar))
 }
 
 // listLike reports a numbered or bulleted list whose markers stand apart
