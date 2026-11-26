@@ -536,7 +536,7 @@ func ruledHeader(words []Word, t *Table, split []bool) int {
 		return n
 	}
 	if n := boldRows(words, t, rows); n > 0 {
-		return n
+		return sectionEnd(t, rows, n)
 	}
 	if n := headerBands(t, split); n > 0 {
 		// A line of units under the headings, "(1,000 acres)" in each
@@ -544,9 +544,41 @@ func ruledHeader(words []Word, t *Table, split []bool) int {
 		if n < len(split) && split[n] && n+1 < len(rows) && unitRow(rows[n]) && dataCells(rows[n+1]) {
 			n++
 		}
-		return n
+		return sectionEnd(t, rows, n)
 	}
-	return textHeader(t, rows)
+	return sectionEnd(t, rows, textHeader(t, rows))
+}
+
+// sectionEnd takes the last of h header rows out of the header when it
+// names a section of the rows and not the columns: a line merged across
+// the columns of figures, "Billions of dollars", where a line of the same
+// kind stands further down the table, "Percent change", over the rows
+// that follow it. The two are rows of the table alike.
+func sectionEnd(t *Table, rows [][]*Cell, h int) int {
+	if h < 2 || h > len(rows) || len(rows[h-1]) != 1 {
+		return h
+	}
+	line := rows[h-1][0]
+	if line.Col > 1 || line.ColSpan < 2 || line.Col+line.ColSpan != t.Cols {
+		return h
+	}
+	// The rows under the header that hold one cell of that shape and
+	// nothing else.
+	filled, alike := make(map[int]int), make(map[int]bool)
+	for i := range t.Cells {
+		c := &t.Cells[i]
+		if c.Row < h || c.Text == "" {
+			continue
+		}
+		filled[c.Row]++
+		alike[c.Row] = c.Col == line.Col && c.ColSpan == line.ColSpan && !figure(c.Text)
+	}
+	for r, n := range filled {
+		if n == 1 && alike[r] {
+			return h - 1
+		}
+	}
+	return h
 }
 
 // TextHeader returns how many rows at the top of a table read as its

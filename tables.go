@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/gomcpgo/unpdf/internal/layout"
 	"github.com/gomcpgo/unpdf/internal/table"
@@ -85,9 +86,11 @@ func (t Table) Grid() [][]string {
 // header row. Where the table's header rows are known, they are that row:
 // each column's heading is what the header rows hold over it, from the top
 // down, joined with " / ", and a heading merged across several columns is
-// repeated over each. Where they are not known, the first row is the header
-// row. Rows and columns with no text are left out, and the lines of a cell
-// are joined.
+// repeated over each. A line of units that the last header row has over
+// every column but the first, "Billions of dollars", is said once, in the
+// first column's heading. Where the header rows are not known, the first
+// row is the header row. Rows and columns with no text are left out, and
+// the lines of a cell are joined.
 func (t Table) Markdown() string {
 	header, body := t.headed()
 	if header == nil {
@@ -109,25 +112,6 @@ func (t Table) headed() (header []string, body [][]string) {
 	}
 	levels := min(t.HeaderRows, t.Rows-1)
 	grid := t.Grid()
-	// The headings over each column, from the top level down.
-	over := make([][]string, t.Cols)
-	for r := 0; r < levels; r++ {
-		for _, c := range t.Cells {
-			text := cellLine(c.Text)
-			if c.Row != r || text == "" || c.Col < 0 || c.Col >= t.Cols {
-				continue
-			}
-			span := max(1, c.ColSpan)
-			if span >= t.Cols {
-				span = 1 // a line across the whole table heads no one column
-			}
-			for col := c.Col; col < min(c.Col+span, t.Cols); col++ {
-				if n := len(over[col]); n == 0 || over[col][n-1] != text {
-					over[col] = append(over[col], text)
-				}
-			}
-		}
-	}
 	// Rows and columns are kept as rows does it: a column stays when a cell
 	// that stands in it has text.
 	keepCol := make([]bool, t.Cols)
@@ -143,7 +127,58 @@ func (t Table) headed() (header []string, body [][]string) {
 			body = append(body, row)
 		}
 	}
+	// The headings over each column, from the top level down, and apart
+	// from them what the last level has over it.
+	over := make([][]string, t.Cols)
+	last := make([]string, t.Cols)
+	for r := 0; r < levels; r++ {
+		for _, c := range t.Cells {
+			text := cellLine(c.Text)
+			if c.Row != r || text == "" || c.Col < 0 || c.Col >= t.Cols {
+				continue
+			}
+			span := max(1, c.ColSpan)
+			if span >= t.Cols {
+				span = 1 // a line across the whole table heads no one column
+			}
+			for col := c.Col; col < min(c.Col+span, t.Cols); col++ {
+				if r == levels-1 {
+					last[col] = text
+				} else if n := len(over[col]); n == 0 || over[col][n-1] != text {
+					over[col] = append(over[col], text)
+				}
+			}
+		}
+	}
+	// A line of units under the headings, "Billions of dollars" across the
+	// columns of figures or "(1,000 acres)" in each of them, is the same
+	// over every column but the first, which has nothing on that level. It
+	// is said once, in the first column's heading, and not over each.
+	units, columns := "", 0
+	for c := 1; c < t.Cols && last[0] == ""; c++ {
+		if !keepCol[c] {
+			continue
+		}
+		if columns++; columns == 1 {
+			units = last[c]
+		} else if last[c] != units {
+			units = ""
+			break
+		}
+	}
+	if columns < 2 || strings.IndexFunc(units, unicode.IsLetter) < 0 {
+		units = "" // a year under every heading is no unit
+	}
 	for c := range over {
+		text := last[c]
+		if units != "" {
+			if text = ""; c == 0 {
+				text = units
+			}
+		}
+		if n := len(over[c]); text != "" && (n == 0 || over[c][n-1] != text) {
+			over[c] = append(over[c], text)
+		}
 		if keepCol[c] {
 			header = append(header, strings.Join(over[c], " / "))
 		}

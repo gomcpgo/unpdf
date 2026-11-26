@@ -626,3 +626,57 @@ func TestHeaderLinesAboveTheTable(t *testing.T) {
 		}
 	}
 }
+
+func TestLineThatNamesASectionOfTheRows(t *testing.T) {
+	// A line merged across the columns of figures stands under the
+	// headings, ruled off, and another like it further down, over the
+	// second half of the rows. Both name the rows under them: neither is
+	// a header row. With the second one gone the first is the line of
+	// units of the whole table, and the last row of its header.
+	build := func(second bool) *page {
+		p := &page{}
+		ys := []float64{100, 120, 140}
+		p.text(114, 55, "Year", 155, "Goods", 255, "Services")
+		p.text(134, 205, "Billions of dollars")
+		y := 140.0
+		row := func(cells ...any) {
+			p.text(y+14, cells...)
+			y += 20
+			ys = append(ys, y)
+		}
+		row(55, "2021", 155, "3,363", 255, "6,686")
+		row(55, "2022", 155, "3,180", 255, "6,711")
+		if second {
+			row(215, "Percent change")
+		}
+		row(55, "2021", 155, "4.1", 255, "2.2")
+		row(55, "2022", 155, "5.4", 255, "0.4")
+		for _, yy := range ys {
+			p.h(yy, 50, 350)
+		}
+		// The columns of figures are parted but for the lines across them.
+		for i := 0; i+1 < len(ys); i++ {
+			p.v(50, ys[i], ys[i+1])
+			p.v(150, ys[i], ys[i+1])
+			p.v(350, ys[i], ys[i+1])
+			if i != 1 && !(second && i == 4) {
+				p.v(250, ys[i], ys[i+1])
+			}
+		}
+		return p
+	}
+	for _, tc := range []struct {
+		second     bool
+		rows, want int
+	}{{true, 7, 1}, {false, 6, 2}} {
+		p := build(tc.second)
+		tables := Ruled(p.words, p.rules)
+		if len(tables) != 1 {
+			t.Fatalf("%d tables", len(tables))
+		}
+		tb := tables[0]
+		if c := cellAt(tb, 1, 1); tb.Rows != tc.rows || tb.HeaderRows != tc.want || c.Text != "Billions of dollars" || c.ColSpan != 2 {
+			t.Errorf("a second line %v: %d rows, %d header rows, %+v", tc.second, tb.Rows, tb.HeaderRows, c)
+		}
+	}
+}

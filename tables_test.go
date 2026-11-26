@@ -347,6 +347,59 @@ func TestTableMarkdownHeaderRows(t *testing.T) {
 	}
 }
 
+func TestLineOfUnitsInMarkdown(t *testing.T) {
+	body := []TableCell{{Row: 2, Col: 0, Text: "2010"}, {Row: 2, Col: 1, Text: "35.61"}, {Row: 2, Col: 2, Text: "32.11"}, {Row: 2, Col: 3, Text: "6.9"}}
+	table := func(header ...TableCell) Table {
+		return Table{Rows: 3, Cols: 4, HeaderRows: 2, Cells: append(header, body...)}
+	}
+	for _, tc := range []struct {
+		name string
+		tb   Table
+		want string // the header row
+	}{
+		// One line merged across the columns of figures, under their
+		// headings: said once, with the first column's heading.
+		{"merged across all columns but the first", table(
+			TableCell{Row: 0, Col: 0, RowSpan: 2, ColSpan: 1, Text: "Year"}, TableCell{Row: 0, Col: 1, Text: "Gross product"},
+			TableCell{Row: 0, Col: 2, Text: "Goods"}, TableCell{Row: 0, Col: 3, Text: "Services"},
+			TableCell{Row: 1, Col: 1, RowSpan: 1, ColSpan: 3, Text: "Billions of dollars"}),
+			"| Year / Billions of dollars | Gross product | Goods | Services |"},
+		{"the same in each column", table(
+			TableCell{Row: 0, Col: 0, RowSpan: 2, ColSpan: 1, Text: "State"}, TableCell{Row: 0, Col: 1, Text: "2022"},
+			TableCell{Row: 0, Col: 2, Text: "2023"}, TableCell{Row: 0, Col: 3, Text: "2024"},
+			TableCell{Row: 1, Col: 1, Text: "(1,000 acres)"}, TableCell{Row: 1, Col: 2, Text: "(1,000 acres)"}, TableCell{Row: 1, Col: 3, Text: "(1,000 acres)"}),
+			"| State / (1,000 acres) | 2022 | 2023 | 2024 |"},
+		{"the first column with no heading", table(
+			TableCell{Row: 0, Col: 1, Text: "Feet"}, TableCell{Row: 0, Col: 2, Text: "Yards"}, TableCell{Row: 0, Col: 3, Text: "Rods"},
+			TableCell{Row: 1, Col: 1, Text: "Meters"}, TableCell{Row: 1, Col: 2, Text: "Meters"}, TableCell{Row: 1, Col: 3, Text: "Meters"}),
+			"| Meters | Feet | Yards | Rods |"},
+		// Not units: the columns differ, or the first column's heading
+		// stands on that level, or it is a year under every heading.
+		{"units that differ", table(
+			TableCell{Row: 0, Col: 0, RowSpan: 2, ColSpan: 1, Text: "State"}, TableCell{Row: 0, Col: 1, Text: "Planted"},
+			TableCell{Row: 0, Col: 2, Text: "Harvested"}, TableCell{Row: 0, Col: 3, Text: "Yield"},
+			TableCell{Row: 1, Col: 1, Text: "(acres)"}, TableCell{Row: 1, Col: 2, Text: "(acres)"}, TableCell{Row: 1, Col: 3, Text: "(bushels)"}),
+			"| State | Planted / (acres) | Harvested / (acres) | Yield / (bushels) |"},
+		{"a heading for the first column on that level", table(
+			TableCell{Row: 0, Col: 1, RowSpan: 1, ColSpan: 3, Text: "Sales"},
+			TableCell{Row: 1, Col: 0, Text: "Year"}, TableCell{Row: 1, Col: 1, Text: "Number"}, TableCell{Row: 1, Col: 2, Text: "Number"}, TableCell{Row: 1, Col: 3, Text: "Number"}),
+			"| Year | Sales / Number | Sales / Number | Sales / Number |"},
+		{"a year under every heading", table(
+			TableCell{Row: 0, Col: 1, Text: "Carrying"}, TableCell{Row: 0, Col: 2, Text: "Fair"}, TableCell{Row: 0, Col: 3, Text: "Par"},
+			TableCell{Row: 1, Col: 1, Text: "2023"}, TableCell{Row: 1, Col: 2, Text: "2023"}, TableCell{Row: 1, Col: 3, Text: "2023"}),
+			"|  | Carrying / 2023 | Fair / 2023 | Par / 2023 |"},
+	} {
+		want := tc.want + "\n| --- | --- | --- | --- |\n| 2010 | 35.61 | 32.11 | 6.9 |"
+		if got := tc.tb.Markdown(); got != want {
+			t.Errorf("%s:\n%s", tc.name, got)
+		}
+		// Grid has the rows as they are.
+		if got := tc.tb.Grid(); len(got) != 3 || got[2][1] != "35.61" {
+			t.Errorf("%s: grid = %q", tc.name, got)
+		}
+	}
+}
+
 func TestHeaderOfSeveralLinesInMarkdown(t *testing.T) {
 	// Column headings of one, two and three lines over rows of figures,
 	// and the same table going on over the page under the same headings.
