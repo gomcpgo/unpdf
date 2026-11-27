@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Line is a line of the page: its words, left to right, as indices into the
@@ -52,9 +53,12 @@ func Aligned(words []Word, lines []Line, rules []Rule) ([]Table, []int) {
 	hs, _ := split(append([]Rule(nil), rules...))
 
 	// A line is tabular when it has a gap wide enough to separate cells.
+	// Lines made by reading across columns of vertical text are no lines at
+	// all, and are left out of the search as text at an angle is.
+	upright := stacked(words, lines)
 	tabular := make([]bool, len(lines))
 	for i, l := range lines {
-		tabular[i] = gapped(words, l)
+		tabular[i] = !upright[i] && gapped(words, l)
 	}
 
 	var tables []Table
@@ -83,7 +87,7 @@ func Aligned(words []Word, lines []Line, rules []Rule) ([]Table, []int) {
 		for end < len(lines) && end-start < maxRows {
 			prev, cur := lines[end-1], lines[end]
 			sz := lineSize(words, cur)
-			if cur.Y0 < prev.Y0-sz || cur.Y0-prev.Y1 > rowPitch*sz {
+			if upright[end] || cur.Y0 < prev.Y0-sz || cur.Y0-prev.Y1 > rowPitch*sz {
 				break
 			}
 			if tabular[end] {
@@ -140,6 +144,65 @@ func Aligned(words []Word, lines []Line, rules []Rule) ([]Table, []int) {
 		start = end
 	}
 	return tables, member
+}
+
+// stacked reports, for each line, whether it is a row of characters cut
+// from vertical text: text written down the page in columns, each character
+// set upright by itself, as Chinese and Japanese are. Nothing in such a
+// page says which way it reads, and taken line by line across the page it
+// looks like a table with a character to a cell: the columns of the text
+// line up as the columns of a table do.
+//
+// What gives it away is the spacing. A character stands right under the
+// one before it, a type size further down, and the columns stand apart, so
+// that every "word" of a line is one character and the lines follow each
+// other with no space between them. A table in the same script has words
+// of several characters in its cells, and space between its rows. Three
+// such lines in a row are asked for: one line of single characters may be
+// the header of a table, "Mon Tue Wed" in one character each.
+func stacked(words []Word, lines []Line) []bool {
+	out := make([]bool, len(lines))
+	single := func(l Line) bool {
+		n := 0
+		for _, i := range l.Words {
+			r, size := utf8.DecodeRuneInString(words[i].Text)
+			if size == len(words[i].Text) && upright(r) {
+				n++
+			}
+		}
+		// A column set closer than the others may have joined two
+		// characters into a word here and there.
+		return n > 0 && n*5 >= len(l.Words)*4
+	}
+	for i := 0; i < len(lines); {
+		if !single(lines[i]) {
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(lines) && single(lines[j]) {
+			prev, cur := lines[j-1], lines[j]
+			if pitch := cur.Y0 - prev.Y0; pitch < 0 || pitch > 1.25*lineSize(words, cur) {
+				break
+			}
+			j++
+		}
+		if j-i >= 3 {
+			for k := i; k < j; k++ {
+				out[k] = true
+			}
+		}
+		i = j
+	}
+	return out
+}
+
+// upright reports a character of a script that is written down the page
+// with its characters upright: Chinese characters, kana and hangul, and the
+// punctuation and full-width forms set with them.
+func upright(r rune) bool {
+	return unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul) ||
+		r >= 0x3000 && r <= 0x303F || r >= 0xFF00 && r <= 0xFFEF
 }
 
 // leadLines takes into a table the lines of its header that stand above
