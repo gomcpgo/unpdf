@@ -492,9 +492,7 @@ func grid(words []Word, hs []hline, vs []vline) (Table, bool) {
 		}
 		return t.Cells[i].Col < t.Cells[j].Col
 	})
-	if t.HeaderRows = headerRows(words, &t); t.HeaderRows == 0 {
-		t.HeaderRows = headerBands(&t, figureRows)
-	}
+	t.HeaderRows = ruledHeader(words, &t, figureRows)
 	return t, true
 }
 

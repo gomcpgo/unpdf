@@ -132,7 +132,7 @@ func Aligned(words []Word, lines []Line, rules []Rule) ([]Table, []int) {
 			end = tab[len(tab)-1] + 1
 		}
 		if t, ok := align(words, lines[start:end], hs); ok {
-			for i := start; i < end; i++ {
+			for i := start - leadLines(words, lines, start, member, &t, hs); i < end; i++ {
 				member[i] = len(tables)
 			}
 			tables = append(tables, t)
@@ -140,6 +140,189 @@ func Aligned(words []Word, lines []Line, rules []Rule) ([]Table, []int) {
 		start = end
 	}
 	return tables, member
+}
+
+// leadLines takes into a table the lines of its header that stand above
+// the first line found: lines[start]. A table starts at the first line
+// with a gap wide enough to part two cells, and a header may begin higher,
+// with a line that has one thing on it: the heading of a group of columns,
+// with a rule under it over those columns, or the top line of a column's
+// heading that is a line longer than the others, "Common" over "stock".
+// The title of a table is neither: it has no rule under it that stops
+// short of the first column, and it does not fit over one column.
+//
+// The heading of a group becomes a header row of its own, and the top line
+// of a column's heading is added to that heading. It returns the number of
+// lines taken, which are the lines just before start.
+func leadLines(words []Word, lines []Line, start int, member []int, t *Table, hs []hline) int {
+	if t.HeaderRows < 1 || t.Cols < 2 {
+		return 0
+	}
+	// Where the text of each column lies.
+	edges := make([][2]float64, t.Cols)
+	for c := range edges {
+		edges[c] = [2]float64{math.Inf(1), math.Inf(-1)}
+	}
+	for _, c := range t.Cells {
+		if c.ColSpan != 1 || c.Col < 0 || c.Col >= t.Cols {
+			continue
+		}
+		for _, i := range c.Words {
+			edges[c.Col][0], edges[c.Col][1] = math.Min(edges[c.Col][0], words[i].X0), math.Max(edges[c.Col][1], words[i].X1)
+		}
+	}
+	taken, grouped := 0, false
+	for k := start - 1; k >= 0 && taken < maxHeaderLines && member[k] < 0; k-- {
+		l := lines[k]
+		size := lineSize(words, l)
+		if len(l.Words) == 0 || l.Y1 > t.Y0+0.3*size || t.Y0-l.Y1 > 1.5*size || l.X1 > t.X1+size || l.X0 < edges[0][1] {
+			break
+		}
+		// Nothing else may stand beside it: the table's box grows to take
+		// the line in, and all that is in the box is the table's.
+		alone := true
+		for j, o := range lines {
+			my := (o.Y0 + o.Y1) / 2
+			if j != k && member[j] < 0 && (j < start-taken || j >= start) && my > l.Y0 && my < t.Y0 && o.X1 > t.X0 && o.X0 < t.X1 {
+				alone = false
+				break
+			}
+		}
+		if !alone {
+			break
+		}
+		if a, b, ok := ruledGroup(l, t, edges, hs, size); ok {
+			for i := range t.Cells {
+				t.Cells[i].Row++
+			}
+			row := make([]Cell, 0, t.Cols)
+			for c := 0; c < t.Cols; c++ {
+				cell := Cell{Row: 0, Col: c, RowSpan: 1, ColSpan: 1, Y0: l.Y0, Y1: l.Y1}
+				for _, o := range t.Cells {
+					if o.Col == c && o.ColSpan == 1 {
+						cell.X0, cell.X1 = o.X0, o.X1
+						break
+					}
+				}
+				switch {
+				case c == a:
+					cell.ColSpan, cell.Words, cell.Text = b-a+1, l.Words, cellText(words, l.Words)
+				case c > a && c <= b:
+					continue
+				}
+				row = append(row, cell)
+			}
+			for i := range row {
+				if row[i].Col == a {
+					for _, o := range t.Cells {
+						if o.Col == b && o.ColSpan == 1 {
+							row[i].X1 = o.X1
+							break
+						}
+					}
+				}
+			}
+			t.Cells = append(row, t.Cells...)
+			t.Rows++
+			t.HeaderRows++
+			grouped = true
+		} else if cell := headingTop(words, l, t, size); cell != nil && !grouped {
+			cell.Words = append(slices.Clone(l.Words), cell.Words...)
+			cell.Text = cellText(words, cell.Words)
+			for i := range t.Cells {
+				if t.Cells[i].Row == cell.Row {
+					t.Cells[i].Y0 = math.Min(t.Cells[i].Y0, l.Y0)
+				}
+			}
+		} else {
+			break
+		}
+		t.Y0 = math.Min(t.Y0, l.Y0)
+		taken++
+	}
+	return taken
+}
+
+// ruledGroup reports whether a line just above a table is the heading of a
+// group of its columns: a rule under the line, between it and the table,
+// runs under the whole of it and over two or more columns of the table,
+// the first column not among them. It returns the columns.
+func ruledGroup(l Line, t *Table, edges [][2]float64, hs []hline, size float64) (a, b int, ok bool) {
+	for _, h := range hs {
+		if h.y < l.Y1-0.3*size || h.y > t.Y0+0.3*size {
+			continue
+		}
+		if math.Min(h.x1, l.X1)-math.Max(h.x0, l.X0) < 0.8*(l.X1-l.X0) || l.X0 < h.x0-size || l.X1 > h.x1+size {
+			continue
+		}
+		a, b = -1, -1
+		for c := range edges {
+			width := edges[c][1] - edges[c][0]
+			if width <= 0 || math.Min(h.x1, edges[c][1])-math.Max(h.x0, edges[c][0]) < 0.5*width {
+				continue
+			}
+			if a < 0 {
+				a = c
+			}
+			b = c
+		}
+		if a >= 1 && b > a {
+			return a, b, true
+		}
+	}
+	return 0, 0, false
+}
+
+// headingTop returns the header cell that a line just above a table is the
+// top line of: the highest heading of one column, when the line fits in
+// that column, is set as close above the heading as the lines of a heading
+// are, in the same size, and is centred or flush as the line under it is.
+// A note in brackets above a column, "(in millions)", is not a line of its
+// heading, and no column is the first.
+func headingTop(words []Word, l Line, t *Table, size float64) *Cell {
+	if len(l.Words) > 4 || strings.HasPrefix(words[l.Words[0]].Text, "(") {
+		return nil
+	}
+	for _, i := range l.Words {
+		if isNumeric(words[i].Text) {
+			return nil
+		}
+	}
+	var cell *Cell
+	for i := range t.Cells {
+		c := &t.Cells[i]
+		if c.Row >= t.HeaderRows {
+			break
+		}
+		if c.Col >= 1 && c.ColSpan == 1 && len(c.Words) > 0 && l.X0 >= c.X0-1 && l.X1 <= c.X1+1 {
+			cell = c
+			break
+		}
+	}
+	if cell == nil {
+		return nil
+	}
+	// The top line of the heading as it stands.
+	top := math.Inf(1)
+	for _, i := range cell.Words {
+		top = math.Min(top, words[i].Y0)
+	}
+	x0, x1 := math.Inf(1), math.Inf(-1)
+	for _, i := range cell.Words {
+		if w := words[i]; w.Y0 < top+0.5*size {
+			x0, x1 = math.Min(x0, w.X0), math.Max(x1, w.X1)
+			if math.Abs(w.Size-size) > 0.5 {
+				return nil
+			}
+		}
+	}
+	if gap := top - l.Y1; gap > 0.6*size || gap < -0.3*size {
+		return nil
+	}
+	if math.Abs((l.X0+l.X1)/2-(x0+x1)/2) > 0.5*size && math.Abs(l.X0-x0) > 1 && math.Abs(l.X1-x1) > 1 {
+		return nil
+	}
+	return cell
 }
 
 // gapped reports whether a line has a gap wide enough to part two cells.
@@ -636,6 +819,9 @@ func separators(words []Word, lines []Line, x0, x1, size float64) []float64 {
 type row struct {
 	cells  [][]int
 	y0, y1 float64
+	// spans holds, for a header row with headings of groups of columns,
+	// how many columns each cell covers: 0 or 1 for a cell of one column.
+	spans []int
 }
 
 func (r *row) filled() int {
@@ -728,7 +914,7 @@ func align(words []Word, lines []Line, hs []hline) (Table, bool) {
 		if crosses {
 			spanning++
 		}
-		rows[li] = row{cells, l.Y0, l.Y1}
+		rows[li] = row{cells: cells, y0: l.Y0, y1: l.Y1}
 	}
 	if signsBefore(words, rows) {
 		for _, rw := range rows {
@@ -820,15 +1006,24 @@ func align(words []Word, lines []Line, hs []hline) (Table, bool) {
 			count(rw, func(c int) string { return cellText(words, rw.cells[c]) })
 		}
 	}
+	texts := make([]string, cols)
 	for r, rw := range rows {
-		at := len(t.Cells)
+		covered := 0 // columns still under a heading merged across them
 		for c, idx := range rw.cells {
-			cell := Cell{Row: r, Col: c, RowSpan: 1, ColSpan: 1, X0: bounds[c], X1: bounds[c+1], Y0: rw.y0, Y1: rw.y1, Words: idx}
-			cell.Text = cellText(words, idx)
-			t.Cells = append(t.Cells, cell)
+			texts[c] = cellText(words, idx)
+			if covered > 0 {
+				covered--
+				continue
+			}
+			span := 1
+			if rw.spans != nil && rw.spans[c] > 1 {
+				span = min(rw.spans[c], cols-c)
+				covered = span - 1
+			}
+			t.Cells = append(t.Cells, Cell{Row: r, Col: c, RowSpan: 1, ColSpan: span, X0: bounds[c], X1: bounds[c+span], Y0: rw.y0, Y1: rw.y1, Words: idx, Text: texts[c]})
 		}
 		if !joined || r >= header {
-			count(rw, func(c int) string { return t.Cells[at+c].Text })
+			count(rw, func(c int) string { return texts[c] })
 		}
 	}
 

@@ -310,3 +310,76 @@ func TestTaggedTitleRow(t *testing.T) {
 		t.Errorf("Markdown:\n%s", md)
 	}
 }
+
+// taggedTable builds a one-page tagged document that holds one table. Each
+// cell is given as its tag and its text, "TH:Team", and a cell with nothing
+// in it as its tag alone.
+func taggedTable(t *testing.T, rows ...[]string) *Document {
+	t.Helper()
+	b := pdftest.New()
+	res := fmt.Sprintf("<< /Font << /F1 %d 0 R >> >>", b.Add(helvetica))
+	root, doc, tb, parents := b.Reserve(), b.Reserve(), b.Reserve(), b.Reserve()
+	var content, trs, marked []string
+	for r, row := range rows {
+		tr := b.Reserve()
+		trs = append(trs, fmt.Sprintf("%d 0 R", tr))
+		var kids []string
+		for c, cell := range row {
+			tag, text, _ := strings.Cut(cell, ":")
+			elem := b.Reserve()
+			kids = append(kids, fmt.Sprintf("%d 0 R", elem))
+			k := ""
+			if text != "" {
+				k = fmt.Sprint(len(marked))
+				text = strings.NewReplacer("(", `\(`, ")", `\)`).Replace(text)
+				content = append(content, fmt.Sprintf("/%s << /MCID %d >> BDC BT /F1 10 Tf %d %d Td (%s) Tj ET EMC", tag, len(marked), 72+130*c, 700-15*r, text))
+				marked = append(marked, fmt.Sprintf("%d 0 R", elem))
+			}
+			b.Set(elem, fmt.Sprintf("<< /Type /StructElem /S /%s /P %d 0 R /K [%s] >>", tag, tr, k))
+		}
+		b.Set(tr, fmt.Sprintf("<< /Type /StructElem /S /TR /P %d 0 R /K [%s] >>", tb, strings.Join(kids, " ")))
+	}
+	b.Set(root, fmt.Sprintf("<< /Type /StructTreeRoot /K %d 0 R /ParentTree %d 0 R >>", doc, parents))
+	b.Set(doc, fmt.Sprintf("<< /Type /StructElem /S /Document /P %d 0 R /K [%d 0 R] >>", root, tb))
+	b.Set(tb, fmt.Sprintf("<< /Type /StructElem /S /Table /P %d 0 R /K [%s] >>", doc, strings.Join(trs, " ")))
+	b.Set(parents, fmt.Sprintf("<< /Nums [0 [%s]] >>", strings.Join(marked, " ")))
+	b.CatalogExtra = fmt.Sprintf("/StructTreeRoot %d 0 R /MarkInfo << /Marked true >>", root)
+	b.Pages(pdftest.PageSpec{Content: strings.Join(content, " "), Resources: res, Extra: "/StructParents 0"})
+	return openBytes(t, b.Bytes(), Options{})
+}
+
+func TestTaggedHeaderRowsFromTheText(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rows [][]string
+		want int
+		grid []string // the first row left
+	}{
+		// The title is tagged as the table's one header row, and the
+		// column headings and the row that numbers them as data. The
+		// title is text around the table; the text shows the header.
+		{"the title as the only header row", [][]string{{"TH:Cases in the year"},
+			{"TD:Type of case", "TD:Cases received", "TD:Cases closed"}, {"TD", "TD:(1)", "TD:(2)"},
+			{"TD:Total", "TD:60,933", "TD:52,997"}, {"TD:Other", "TD:4,772", "TD:4,741"}},
+			2, []string{"Type of case", "Cases received", "Cases closed"}},
+		{"no header tagged", [][]string{{"TD:Region", "TD:Second", "TD:Third"},
+			{"TD:North", "TD:1,204", "TD:1,318"}, {"TD:South", "TD:982", "TD:1,045"}},
+			1, []string{"Region", "Second", "Third"}},
+		// What the tags say is not second-guessed.
+		{"a header tagged", [][]string{{"TH:Region", "TH:Second", "TH:Third"}, {"TD:Kind", "TD:wood", "TD:metal"},
+			{"TD:North", "TD:1,204", "TD:1,318"}, {"TD:South", "TD:982", "TD:1,045"}},
+			1, []string{"Region", "Second", "Third"}},
+		{"words only", [][]string{{"TD:Name", "TD:Kind", "TD:Place"}, {"TD:Alpha", "TD:wood", "TD:north"},
+			{"TD:Beta", "TD:metal", "TD:south"}},
+			0, []string{"Name", "Kind", "Place"}},
+	} {
+		p, _ := taggedTable(t, tc.rows...).Page(ctx, 1)
+		tables, err := p.Tables(ctx)
+		if err != nil || len(tables) != 1 {
+			t.Fatalf("%s: tables = %+v, %v", tc.name, tables, err)
+		}
+		if tb := tables[0]; tb.Method != TableFromStructure || tb.HeaderRows != tc.want || !reflect.DeepEqual(tb.Grid()[0], tc.grid) {
+			t.Errorf("%s: %s, %d header rows, want %d; first row %q", tc.name, tb.Method, tb.HeaderRows, tc.want, tb.Grid()[0])
+		}
+	}
+}
