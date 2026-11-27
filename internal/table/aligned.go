@@ -1120,10 +1120,11 @@ func align(words []Word, lines []Line, hs []hline) (Table, bool) {
 	conf -= 0.3 * float64(spanning) / float64(len(lines))
 	conf = math.Min(conf, 0.9)
 	switch {
-	case unsure || listLike(&t) || contentsLike(&t) || formulaLike(words, &t):
+	case unsure || listLike(&t) || contentsLike(&t) || formulaLike(words, &t) || formLike(&t):
 		// Prose in columns with nothing to mark the rows; a numbered list
 		// with its numbers set apart; a table of contents; a matrix or a
-		// formula set in rows and columns.
+		// formula set in rows and columns; the questions of a form with
+		// the boxes for their answers.
 		conf = math.Min(conf, 0.3)
 	case well*2 < lineCount && edged < 2, lineCount < 5 && well < lineCount && bounding < 2, cols == 2 && !figures && bounding < 2:
 		// Too ragged; or small, not full and not ruled off, like the
@@ -1597,6 +1598,50 @@ func mathSign(s string) bool {
 		}
 	}
 	return signs == 1 || (signs > 1 && strings.ContainsRune(s, unicode.ReplacementChar))
+}
+
+// formLike reports the fields of a form that stand in rows and columns: a
+// label, a row of dots, and a box to tick or to write in. The boxes are
+// drawn, not written, so the dots lead to nothing: the cell after them is
+// empty, or holds the label of the next field. In a table, a row of dots
+// leads from a label to its figure.
+//
+// Three cells or more must end a line in such dots, and four in five of
+// the cells that end a line in dots at all.
+func formLike(t *Table) bool {
+	if t.Rows > maxRows || t.Cols > 60 {
+		return false
+	}
+	// For each cell that ends a line in a row of dots, where the next cell
+	// of its row is.
+	type led struct{ row, col, end int }
+	var leds []led
+	figures := map[[2]int]bool{} // the cells that hold a figure
+	for _, c := range t.Cells {
+		if c.Text == "" {
+			continue
+		}
+		dots := false
+		for _, line := range strings.Split(c.Text, "\n") {
+			line = strings.TrimSpace(line)
+			if trimmed := strings.TrimRight(line, ". "); len(line)-len(trimmed) >= 3 && strings.Count(line[len(trimmed):], ".") >= 3 {
+				dots = true
+			}
+			if isNumeric(strings.Trim(line, ". ")) {
+				figures[[2]int{c.Row, c.Col}] = true
+			}
+		}
+		if dots {
+			leds = append(leds, led{c.Row, c.Col, c.Col + max(c.ColSpan, 1)})
+		}
+	}
+	blind := 0
+	for _, l := range leds {
+		if !figures[[2]int{l.row, l.end}] {
+			blind++
+		}
+	}
+	return blind >= 3 && blind*5 >= len(leds)*4
 }
 
 // listLike reports a numbered or bulleted list whose markers stand apart
