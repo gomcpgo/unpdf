@@ -1626,39 +1626,60 @@ func listLike(t *Table) bool {
 
 // contentsLike reports a table of contents: titles on the left, page
 // numbers that never go down on the right.
+//
+// A page number may carry the letter of its part of the document, "K-118"
+// or "A-3". Where the lines of several entries have been put into one row,
+// each line of the last column is the page number of one entry. And a row
+// with one thing on it and no page number is a heading between groups of
+// entries, "Part II": it does not count against the page numbers, and their
+// rise is followed across it.
 func contentsLike(t *Table) bool {
 	if t.Cols > 3 || t.Rows < 4 {
 		return false
 	}
-	pages, rising, pairs := 0, 0, 0
-	last := -1
+	filled := make([]int, t.Rows)  // the cells with text in each row
+	last := make([]string, t.Rows) // the text of its last column
 	for _, c := range t.Cells {
-		if c.Col != t.Cols-1 || !isPageNumber(c.Text) {
+		if c.Text == "" || c.Row < 0 || c.Row >= t.Rows {
 			continue
 		}
-		pages++
-		n := 0
-		for _, r := range c.Text {
-			if r < '0' || r > '9' {
-				n = -1
-				break
-			}
-			n = n*10 + int(r-'0')
+		filled[c.Row]++
+		if c.Col == t.Cols-1 {
+			last[c.Row] = c.Text
 		}
-		if n >= 0 {
-			if last >= 0 {
+	}
+	entries, pages, rising, pairs := 0, 0, 0, 0
+	part, before := "", -1 // of the page number before
+	for r, text := range last {
+		if text == "" {
+			if filled[r] > 1 {
+				entries++
+			}
+			continue
+		}
+		for _, line := range strings.Split(text, "\n") {
+			entries++
+			p, n, ok := pageLabel(strings.TrimSpace(line))
+			if !ok {
+				continue
+			}
+			pages++
+			if n < 0 {
+				continue
+			}
+			if before >= 0 && p == part {
 				pairs++
-				if n >= last {
+				if n >= before {
 					rising++
 				}
 			}
-			last = n
+			part, before = p, n
 		}
 	}
 	if leaders(t)*2 >= t.Rows {
 		return true
 	}
-	if pages*5 < t.Rows*4 || rising*10 < pairs*9 {
+	if pages < 4 || pages*5 < entries*4 || rising*10 < pairs*9 {
 		return false
 	}
 	// The other columns hold words, not figures.
@@ -1695,6 +1716,33 @@ func leaders(t *Table) int {
 		}
 	}
 	return n
+}
+
+// pageLabel reports a page number as a table of contents prints it: a
+// short number in digits or roman numerals, or a number after the letters
+// of a part of the document and a hyphen, "K-118". It returns the part,
+// and the number, which is -1 for roman numerals.
+func pageLabel(s string) (part string, n int, ok bool) {
+	if i := strings.IndexByte(s, '-'); i >= 1 && i <= 3 {
+		for _, r := range s[:i] {
+			if !unicode.IsLetter(r) {
+				return "", 0, false
+			}
+		}
+		part, s = s[:i], s[i+1:]
+	}
+	if !isPageNumber(s) {
+		return "", 0, false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			// Roman numerals. After the letters of a part they would be a
+			// word with a hyphen in it.
+			return "", -1, part == ""
+		}
+		n = n*10 + int(r-'0')
+	}
+	return part, n, true
 }
 
 // isPageNumber reports a short number in digits or roman numerals.

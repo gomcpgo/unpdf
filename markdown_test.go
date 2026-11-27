@@ -170,3 +170,54 @@ func TestEscapeStart(t *testing.T) {
 		}
 	}
 }
+
+func TestContentsLinesKeepTheirBreaks(t *testing.T) {
+	// Words 6 points wide to a character, in 10 point type.
+	line := func(y float64, text string) Line {
+		l := Line{Box: Box{72, y, 72, y + 10}}
+		x := 72.0
+		for _, w := range strings.Fields(text) {
+			l.Words = append(l.Words, Word{Text: w, Size: 10, Box: Box{x, y, x + 6*float64(len(w)), y + 10}})
+			x += 6*float64(len(w)) + 3
+		}
+		l.Box.X1 = x - 3
+		return l
+	}
+	block := func(lines ...string) *Block {
+		b := &Block{Box: Box{72, 100, 72, 100}}
+		for i, text := range lines {
+			l := line(100+12*float64(i), text)
+			b.Lines = append(b.Lines, l)
+			b.Box.X1, b.Box.Y1 = max(b.Box.X1, l.Box.X1), l.Box.Y1
+		}
+		return b
+	}
+	// The entries of a table of contents reach the full width, as the
+	// lines of a paragraph do, and each stays a line.
+	contents := block(
+		"Item 1. Business of the company . . . . . . . . . . . 1",
+		"Item 2. Risks the company runs . . . . . . . . . . . 14",
+		"Item 3. Properties that it owns . . . . . . . . . . . 22",
+		"Item 4. Proceedings at law . . . . . . . . . . . . . 25")
+	if isProse(contents) {
+		t.Error("the lines of a table of contents run on")
+	}
+	if got := renderBlock(contents, nil); strings.Count(got, "\n") != 3 {
+		t.Errorf("rendered as %q", got)
+	}
+	// One line with a leader at its end is the end of a sentence.
+	sentence := block(
+		"If you do not want to claim the credit, as most do, you",
+		"check the box at the end of the line here . . . . . . . .")
+	if !isProse(sentence) {
+		t.Error("a sentence that ends in a leader does not run on")
+	}
+	for text, want := range map[string]bool{
+		"Chapter one . . . . 12": true, "Chapter one ........ 12": true, "and so on ... to the end": false,
+		"a . b . c . d": false, "no dots": false, "": false,
+	} {
+		if got := leaderLine(line(0, text)); got != want {
+			t.Errorf("leaderLine(%q) = %v", text, got)
+		}
+	}
+}
