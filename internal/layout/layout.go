@@ -65,6 +65,11 @@ type Line struct {
 	// RTL reports a line of right-to-left script. Its words are in logical
 	// order: the first word is the rightmost on the page.
 	RTL bool
+	// Compound reports that the hyphen the line ends with belongs to its
+	// last word: a compound, such as "long-term", broken at its hyphen and
+	// going on with the first word of the next line. The layout cannot
+	// tell; whoever knows the words of the document sets it.
+	Compound bool
 }
 
 // Block is a group of lines that belong together: a paragraph, a heading,
@@ -1158,31 +1163,45 @@ func (l Line) Text() string {
 func (b Block) Text() string {
 	lines := make([][]string, len(b.Lines))
 	rtl := make([]bool, len(b.Lines))
+	var compound []bool
 	for i, l := range b.Lines {
 		lines[i] = make([]string, len(l.Words))
 		for j, w := range l.Words {
 			lines[i][j] = w.Text
 		}
 		rtl[i] = l.RTL
+		if l.Compound {
+			if compound == nil {
+				compound = make([]bool, len(b.Lines))
+			}
+			compound[i] = true
+		}
 	}
-	return JoinLines(lines, rtl)
+	return JoinLines(lines, rtl, compound)
 }
 
 // JoinLines renders lines of words as text, joining words hyphenated across
 // line ends. rtl says which lines are right-to-left; those are left alone.
-// The slices in lines are modified.
-func JoinLines(lines [][]string, rtl []bool) string {
+// compound, which may be nil, says which lines end in the hyphen of a
+// compound: there the word is joined with its hyphen kept. The slices are
+// modified.
+func JoinLines(lines [][]string, rtl, compound []bool) string {
 	for i := 0; i+1 < len(lines); {
 		cur, next := lines[i], lines[i+1]
 		if len(next) == 0 {
 			// A line used up by the word above it: close the gap, so that
-			// a word split over three lines is joined in full.
+			// a word split over three lines is joined in full. The word now
+			// ends as that line did.
 			lines, rtl = append(lines[:i+1], lines[i+2:]...), append(rtl[:i+1], rtl[i+2:]...)
+			if compound != nil {
+				compound[i] = compound[i+1]
+				compound = append(compound[:i+1], compound[i+2:]...)
+			}
 			continue
 		}
 		if len(cur) > 0 && !rtl[i] {
-			if stem, ok := Hyphenated(cur[len(cur)-1], next[0]); ok {
-				cur[len(cur)-1] = stem + next[0]
+			if word, ok := Join(cur[len(cur)-1], next[0], compound != nil && compound[i]); ok {
+				cur[len(cur)-1] = word
 				lines[i+1] = next[1:]
 				continue
 			}
@@ -1198,6 +1217,22 @@ func JoinLines(lines [][]string, rtl []bool) string {
 	return strings.Join(out, "\n")
 }
 
+// Join joins last, the final word of a line, to next, the first word of the
+// following line, if last was split there. compound says that its hyphen
+// is the hyphen of a compound, and stays: "long-" and "term" make
+// "long-term", where "exam-" and "ple" make "example". A soft hyphen never
+// stays.
+func Join(last, next string, compound bool) (string, bool) {
+	stem, ok := Hyphenated(last, next)
+	if !ok {
+		return "", false
+	}
+	if compound && !strings.HasSuffix(last, "\u00ad") {
+		return last + next, true
+	}
+	return stem + next, true
+}
+
 // Hyphenated reports whether last, the final word of a line, was split by
 // hyphenation and continues with next, the first word of the following
 // line. It returns the word without its hyphen.
@@ -1205,7 +1240,10 @@ func JoinLines(lines [][]string, rtl []bool) string {
 // The test is conservative. A soft hyphen always marks a split. An ordinary
 // hyphen does only when lower-case letters stand on both sides of the line
 // break: that leaves out compounds with capitals, numbers, ranges and
-// dashes, at the price of joining a few compounds such as "well-" "known".
+// dashes. A compound of two lower-case words broken at its hyphen, "well-"
+// "known", passes the test too. Nothing in the two words tells it from a
+// word broken for the line; the other words of the document may, and
+// Line.Compound is where that is recorded.
 func Hyphenated(last, next string) (string, bool) {
 	r := []rune(last)
 	if len(r) < 2 {

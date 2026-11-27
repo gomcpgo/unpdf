@@ -51,8 +51,15 @@ type Page struct {
 	furnished  bool
 	public     []Block // the blocks as Blocks returns them
 	classified bool
-	tables     []Table
-	tabled     bool
+	// keys holds a number for every word of the page, and around those of
+	// the pages around it with its own: what tells a compound broken at
+	// its hyphen from a word broken for the line.
+	keys     []uint64
+	keyed    bool
+	around   [][]uint64
+	surveyed bool
+	tables   []Table
+	tabled   bool
 	// tags is the structure tree's account of the page, when the page was
 	// laid out by it, and structTables the tables it marks.
 	tags         *pageTags
