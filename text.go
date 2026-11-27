@@ -375,7 +375,8 @@ func (p *Page) fieldValue(ctx context.Context, annot pdfobj.Dict) string {
 
 // Text returns the text of the page in reading order: its blocks, as
 // Blocks returns them, separated by blank lines, with one line of text per
-// line on the page. Words hyphenated at a line end are joined.
+// line on the page. Words hyphenated at a line end are joined, as
+// Block.Text describes.
 //
 // Glyphs whose font gives no Unicode mapping appear as U+FFFD, and are
 // counted in a warning.

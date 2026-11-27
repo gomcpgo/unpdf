@@ -357,6 +357,7 @@ func (p *Page) markdown(ctx context.Context, opts MarkdownOptions, carry *tableT
 				rest.Lines = append(rest.Lines, l)
 			case len(kept) > 0:
 				part := Line{Words: kept, RTL: l.RTL, Box: kept[0].Box}
+				part.compound = l.compound && kept[len(kept)-1].Box == l.Words[len(l.Words)-1].Box
 				for _, w := range kept[1:] {
 					part.Box.X0, part.Box.Y0 = math.Min(part.Box.X0, w.Box.X0), math.Min(part.Box.Y0, w.Box.Y0)
 					part.Box.X1, part.Box.Y1 = math.Max(part.Box.X1, w.Box.X1), math.Max(part.Box.Y1, w.Box.Y1)
@@ -398,8 +399,8 @@ func renderBlock(b *Block, web []Link) string {
 		if len(cur) == 0 || len(next) == 0 || b.Lines[j].RTL {
 			continue
 		}
-		if stem, ok := layout.Hyphenated(cur[len(cur)-1].text, next[0].text); ok {
-			cur[len(cur)-1].text = stem + next[0].text
+		if word, ok := layout.Join(cur[len(cur)-1].text, next[0].text, b.Lines[j].compound); ok {
+			cur[len(cur)-1].text = word
 			lines[j+1] = next[1:]
 		}
 	}

@@ -40,6 +40,10 @@ type Line struct {
 	// Its words are in logical order: the first word is the rightmost on
 	// the page.
 	RTL bool
+
+	// compound reports that the hyphen the line ends with belongs to its
+	// last word, a compound that goes on with the next line.
+	compound bool
 }
 
 // Text returns the line's words separated by single spaces.
@@ -83,20 +87,30 @@ type Block struct {
 }
 
 // Text returns the text of the block, one line of the page per line of
-// text. A word hyphenated at the end of a line is joined to its
-// continuation when the hyphen is clearly there for the line break: a soft
-// hyphen, or a hyphen between two lower-case letters.
+// text. A word broken at the end of a line is joined to its continuation,
+// which moves up to the line where the word began, when the hyphen is a
+// soft hyphen or stands between two lower-case letters. The hyphen goes,
+// as in "exam-" "ple", unless the pages around write the word with it and
+// never without, as they may "long-" "term": then it is the hyphen of a
+// compound, and stays.
 func (b Block) Text() string {
 	lines := make([][]string, len(b.Lines))
 	rtl := make([]bool, len(b.Lines))
+	var compound []bool
 	for i, l := range b.Lines {
 		lines[i] = make([]string, len(l.Words))
 		for j, w := range l.Words {
 			lines[i][j] = w.Text
 		}
 		rtl[i] = l.RTL
+		if l.compound {
+			if compound == nil {
+				compound = make([]bool, len(b.Lines))
+			}
+			compound[i] = true
+		}
 	}
-	return layout.JoinLines(lines, rtl)
+	return layout.JoinLines(lines, rtl, compound)
 }
 
 // Blocks returns the text of the page as blocks of lines of words, in
@@ -137,7 +151,7 @@ func (p *Page) Blocks(ctx context.Context) ([]Block, error) {
 			}
 		}
 		for j, l := range b.Lines {
-			line := Line{Box: Box(l.Box), RTL: l.RTL, Words: make([]Word, len(l.Words))}
+			line := Line{Box: Box(l.Box), RTL: l.RTL, compound: l.Compound, Words: make([]Word, len(l.Words))}
 			for k, w := range l.Words {
 				line.Words[k] = Word{Text: w.Text, Box: Box(w.Box), Font: w.Font, Size: w.Size, Bold: w.Bold, Italic: w.Italic}
 			}
@@ -199,8 +213,9 @@ func joinHeadings(blocks []Block) []Block {
 }
 
 // layout interprets the page and analyses its layout. With furniture set,
-// lines that repeat from page to page are marked, which means reading the
-// two pages before and the two after as well.
+// lines that repeat from page to page are marked, and so are lines that end
+// in the hyphen of a compound, which means reading the four pages before
+// and the four after as well.
 func (p *Page) layout(ctx context.Context, furniture bool) ([]layout.Block, error) {
 	if !p.laidOut {
 		pc, err := p.interpret(ctx)
@@ -237,6 +252,9 @@ func (p *Page) layout(ctx context.Context, furniture bool) ([]layout.Block, erro
 		p.marked = p.blocks
 		if test != nil {
 			p.marked = layout.Mark(p.blocks, test)
+		}
+		if err := p.markCompounds(ctx, p.marked); err != nil {
+			return nil, err
 		}
 		p.furnished = true
 	}

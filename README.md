@@ -155,7 +155,7 @@ go run github.com/gomcpgo/unpdf/cmd/unpdf images -out pictures report.pdf
   - Words, lines and blocks, each with its box; words with font, size, bold and italic.
   - Columns read one after the other; tables and other aligned text read row by row.
   - Arabic and Hebrew in logical order, with embedded numbers and Latin words in place.
-  - Words hyphenated at a line end joined, where the hyphen is clearly for the line break.
+  - Words hyphenated at a line end joined, where the hyphen is clearly for the line break. A compound broken at its hyphen keeps it ("long-" and "term" make "long-term") when the pages around, up to four each way, write it with the hyphen and never without. One they do not write again loses its hyphen.
   - Rotated pages and rotated text, each direction laid out on its own.
   - Running heads, running feet and page numbers marked, by comparing each page with its neighbours.
   - Text that is clipped away, outside the crop box, or drawn twice on top of itself is left out. Invisible text is left out too, unless it is the OCR layer of a scanned page.

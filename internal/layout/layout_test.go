@@ -187,12 +187,37 @@ func TestHyphenation(t *testing.T) {
 		for i, l := range tt.lines {
 			lines[i] = strings.Fields(l)
 		}
-		if got := JoinLines(lines, make([]bool, len(lines))); got != tt.want {
+		if got := JoinLines(lines, make([]bool, len(lines)), nil); got != tt.want {
 			t.Errorf("%q: got %q, want %q", tt.lines, got, tt.want)
 		}
 	}
+	// A line marked as ending in the hyphen of a compound keeps the hyphen.
+	// The mark is the line's: the next break of the same word, on the line
+	// that was used up, goes by that line's mark. A soft hyphen goes
+	// whatever the mark says, and a hyphen that joins nothing stays where
+	// it is.
+	for _, tt := range []struct {
+		lines    []string
+		compound []bool
+		want     string
+	}{
+		{[]string{"a long-", "term plan"}, []bool{true, false}, "a long-term\nplan"},
+		{[]string{"a long-", "term plan"}, []bool{false, false}, "a longterm\nplan"},
+		{[]string{"an out-", "of-", "band channel"}, []bool{true, true, false}, "an out-of-band\nchannel"},
+		{[]string{"an out-", "of-", "band channel"}, []bool{true, false, false}, "an out-ofband\nchannel"},
+		{[]string{"soft­", "hyphen"}, []bool{true, false}, "softhyphen"},
+		{[]string{"the X-", "ray"}, []bool{true, false}, "the X-\nray"},
+	} {
+		lines := make([][]string, len(tt.lines))
+		for i, l := range tt.lines {
+			lines[i] = strings.Fields(l)
+		}
+		if got := JoinLines(lines, make([]bool, len(lines)), tt.compound); got != tt.want {
+			t.Errorf("%q with %v: got %q, want %q", tt.lines, tt.compound, got, tt.want)
+		}
+	}
 	// Right-to-left lines are left alone.
-	if got := JoinLines([][]string{{"ab-"}, {"cd"}}, []bool{true, false}); got != "ab-\ncd" {
+	if got := JoinLines([][]string{{"ab-"}, {"cd"}}, []bool{true, false}, nil); got != "ab-\ncd" {
 		t.Errorf("rtl: got %q", got)
 	}
 }
@@ -433,6 +458,13 @@ func FuzzAnalyze(f *testing.F) {
 		}
 		check := func(blocks []Block) {
 			blocks = Mark(blocks, func(text string, box Box) bool { return len(text)%2 == 0 })
+			Text(blocks)
+			// Again with some lines marked as ending in a compound's hyphen.
+			for _, b := range blocks {
+				for i := range b.Lines {
+					b.Lines[i].Compound = (i+int(mode))%2 == 0
+				}
+			}
 			Text(blocks)
 			for _, b := range blocks {
 				for _, l := range b.Lines {

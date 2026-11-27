@@ -418,7 +418,11 @@ func (p *Page) Tables(ctx context.Context) ([]Table, error) {
 		made := Table{Box: Box{t.X0, t.Y0, t.X1, t.Y1}, Rows: t.Rows, Cols: t.Cols, HeaderRows: t.HeaderRows,
 			Confidence: math.Round(t.Confidence*100) / 100, Method: t.Method, Cells: make([]TableCell, len(t.Cells))}
 		for k, c := range t.Cells {
-			made.Cells[k] = TableCell{Row: c.Row, Col: c.Col, RowSpan: c.RowSpan, ColSpan: c.ColSpan, Box: Box{c.X0, c.Y0, c.X1, c.Y1}, Text: cleanCell(c.Text)}
+			text, err := p.cellCompounds(ctx, cleanCell(c.Text))
+			if err != nil {
+				return nil, err
+			}
+			made.Cells[k] = TableCell{Row: c.Row, Col: c.Col, RowSpan: c.RowSpan, ColSpan: c.ColSpan, Box: Box{c.X0, c.Y0, c.X1, c.Y1}, Text: text}
 		}
 		trimRows(&made)
 		if made.Rows > 0 {
