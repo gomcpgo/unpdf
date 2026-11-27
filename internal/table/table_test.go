@@ -675,6 +675,7 @@ func FuzzTables(f *testing.F) {
 		}
 		for i := range aligned {
 			Figure(&aligned[i], drawn, drawn)
+			Beside(&aligned[i], drawn, drawn)
 		}
 		if len(member) != len(lines) {
 			t.Fatalf("%d memberships for %d lines", len(member), len(lines))
