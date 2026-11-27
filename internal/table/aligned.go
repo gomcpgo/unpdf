@@ -131,6 +131,7 @@ func Aligned(words []Word, lines []Line, rules []Rule) ([]Table, []int) {
 		if len(tab) < 2 {
 			end = tab[len(tab)-1] + 1
 		}
+		end -= below(words, lines[start:end], tab[len(tab)-1]-start, hs)
 		if t, ok := align(words, lines[start:end], hs); ok {
 			for i := start - leadLines(words, lines, start, member, &t, hs); i < end; i++ {
 				member[i] = len(tables)
@@ -140,6 +141,130 @@ func Aligned(words []Word, lines []Line, rules []Rule) ([]Table, []int) {
 		start = end
 	}
 	return tables, member
+}
+
+// below returns how many lines at the end of a run are text under the table
+// and not rows of it: a note that the table goes on over the page, a source,
+// the title of what comes next. last is the last line of the run with a gap
+// wide enough to part cells; the lines after it, which are the ones looked
+// at, each read as one cell. What they say is not asked, only where they
+// stand. Such a line ends the table, with every line after it, when
+//
+//   - it stands under the rule that closes the table: a rule across the
+//     table's width lies between it and the lines above, with another higher
+//     up and none below;
+//   - or it is centred over the table and set apart from the rows: the title
+//     of the next table, where the further lines of a label begin where the
+//     label does and follow it closely;
+//   - or it ends at the table's right edge and begins well inside the last
+//     column, whose other lines all begin at the column's left edge: a note
+//     set flush right under a column of text set flush left.
+//
+// The further lines of a cell do none of these, and neither does a last row
+// with one cell filled: it has the table's closing rule under it, and its
+// cell begins or ends where the column's others do. A line of figures alone
+// is never taken for a note.
+func below(words []Word, lines []Line, last int, hs []hline) int {
+	if last < 1 || last+1 >= len(lines) {
+		return 0
+	}
+	x0, x1, size := extent(words, lines[:last+1])
+	if size <= 0 || x1-x0 <= 0 {
+		return 0
+	}
+	// The rules across the table's width, and the lowest text above each
+	// line: lines are in reading order, which in a row of wrapped cells is
+	// not from the top down.
+	var across []float64
+	for _, h := range hs {
+		if math.Min(h.x1, x1)-math.Max(h.x0, x0) >= 0.7*(x1-x0) {
+			across = append(across, h.y)
+		}
+	}
+	mid, bottom := math.Inf(-1), math.Inf(-1) // of the lines before the one looked at
+	gaps := make([]float64, len(lines))       // the space above each line
+	for i, l := range lines[:last+1] {
+		if i > 0 {
+			gaps[i] = l.Y0 - bottom
+		}
+		mid, bottom = math.Max(mid, (l.Y0+l.Y1)/2), math.Max(bottom, l.Y1)
+	}
+	var column [2]float64 // where the last column's text lies
+	flushLeft := -1       // whether its lines all begin at its left edge; -1 not yet asked
+	for i := last + 1; i < len(lines); i++ {
+		l := lines[i]
+		sz := lineSize(words, l)
+		gaps[i] = l.Y0 - bottom
+		m := (l.Y0 + l.Y1) / 2
+		// A note is words. A line of figures alone is a row whose label is
+		// left out: a total under its rule.
+		figures := true
+		for _, k := range l.Words {
+			figures = figures && (isFigure(words[k].Text) || isDash(words[k].Text))
+		}
+		if figures {
+			mid, bottom = math.Max(mid, m), math.Max(bottom, l.Y1)
+			continue
+		}
+
+		// Under the closing rule.
+		closing, higher, lower := false, false, false
+		for _, y := range across {
+			switch {
+			case y > mid && y < m:
+				closing = true
+			case y <= mid && y >= lines[0].Y0-1.5*size:
+				higher = true
+			case y >= m && y <= lines[len(lines)-1].Y1+1.5*size:
+				lower = true
+			}
+		}
+		if closing && higher && !lower && m > mid {
+			return len(lines) - i
+		}
+
+		// Centred over the table, and apart from its rows.
+		if math.Abs((l.X0+l.X1)/2-(x0+x1)/2) <= 0.5*sz && l.X0-x0 >= 3*sz && x1-l.X1 >= 3*sz {
+			usual := 0.0
+			for _, g := range gaps[max(1, i-4):i] {
+				usual = math.Max(usual, g)
+			}
+			if gaps[i] >= 0.4*sz && gaps[i] > 2*usual {
+				return len(lines) - i
+			}
+		}
+
+		// Flush right under a column set flush left.
+		if flushLeft < 0 {
+			flushLeft = 0
+			table := lines[:last+1]
+			if seps := separators(words, table, x0, x1, size); len(seps) > 0 {
+				sep := seps[len(seps)-1]
+				column = columnExtents(words, table, seps)[len(seps)]
+				n := 0
+				flushLeft = 1
+				for _, tl := range table {
+					for _, k := range tl.Words {
+						if w := words[k]; (w.X0+w.X1)/2 > sep {
+							if n++; w.X0 > column[0]+0.5*size {
+								flushLeft = 0
+							}
+							break
+						}
+					}
+				}
+				if n < 3 {
+					flushLeft = 0
+				}
+			}
+		}
+		if flushLeft == 1 && l.X0 >= column[0]+2*sz && l.X1 >= x1-sz && m > mid {
+			return len(lines) - i
+		}
+
+		mid, bottom = math.Max(mid, m), math.Max(bottom, l.Y1)
+	}
+	return 0
 }
 
 // leadLines takes into a table the lines of its header that stand above
