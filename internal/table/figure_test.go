@@ -85,3 +85,38 @@ func TestFigureEdges(t *testing.T) {
 		t.Error("a merged cell hid the rows an arc runs through")
 	}
 }
+
+func TestBesideAFigure(t *testing.T) {
+	// The labels lie between x 50 and 290 and between y 106 and 176: 70
+	// points of four rows, 17.5 to a row.
+	tb := labels(t)
+	for _, tc := range []struct {
+		name             string
+		shapes, pictures []Box
+		want             bool
+	}{
+		{"a picture that ends at the top row", nil, []Box{{60, 20, 280, 110}}, true},
+		{"a picture that begins at the last row", nil, []Box{{60, 170, 280, 300}}, true},
+		{"a picture two rows above", nil, []Box{{60, 0, 280, 70}}, false},
+		{"a picture over a third of the width", nil, []Box{{50, 20, 130, 110}}, false},
+		{"a picture lower than the table is high", nil, []Box{{60, 60, 280, 110}}, false},
+		{"a picture under the table", nil, []Box{{40, 100, 300, 180}}, false},
+		{"two small pictures side by side", nil, []Box{{50, 20, 150, 110}, {190, 20, 290, 110}}, false},
+		{"the lines of a chart below", []Box{{55, 180, 160, 260}, {150, 185, 285, 250}}, nil, true},
+		{"an arrowhead below", []Box{{100, 180, 110, 190}}, nil, false},
+		{"lines that begin three rows below", []Box{{55, 230, 285, 400}}, nil, false},
+		{"nothing drawn", nil, nil, false},
+	} {
+		if got := Beside(tb, tc.shapes, tc.pictures); got != tc.want {
+			t.Errorf("%s: got %v", tc.name, got)
+		}
+	}
+	// A table of more rows is no row of labels, whatever stands over it.
+	tb.Rows = edgeRows + 1
+	if Beside(tb, nil, []Box{{60, 20, 280, 110}}) {
+		t.Error("a table of five rows is taken for the labels of a figure")
+	}
+	if Beside(&Table{}, nil, []Box{{0, 0, 10, 10}}) {
+		t.Error("an empty table")
+	}
+}

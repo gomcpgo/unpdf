@@ -491,9 +491,21 @@ func inline(toks []token, links []Link) string {
 // most lines but the last reach the full width of the block, the lines hold
 // several words each, and few are spaced out like the rows of a table. An
 // address, whose lines happen to be of a length, fails on the second count.
+// The lines of a table of contents reach the full width by their dot
+// leaders, and each is an entry of its own; one line with a leader is the
+// end of a sentence that leads to a box or a figure.
 func isProse(b *Block) bool {
 	if len(b.Lines) < 2 {
 		return true
+	}
+	led := 0
+	for _, l := range b.Lines {
+		if leaderLine(l) {
+			led++
+		}
+	}
+	if led >= 2 && led*3 >= len(b.Lines) {
+		return false
 	}
 	width := b.Box.X1 - b.Box.X0
 	if b.Angle == 90 || b.Angle == 270 {
@@ -524,6 +536,23 @@ func isProse(b *Block) bool {
 		}
 	}
 	return full*10 >= (len(b.Lines)-1)*6 && spaced*10 < len(b.Lines)*3 && words*2 >= (len(b.Lines)-1)*9
+}
+
+// leaderLine reports a line with a row of dots in it that leads the eye
+// across, as from a title to its page number: four dots or more, in one
+// word or set apart. An ellipsis has three.
+func leaderLine(l Line) bool {
+	dots := 0
+	for _, w := range l.Words {
+		if strings.Trim(w.Text, ".") != "" {
+			dots = 0
+			continue
+		}
+		if dots += len(w.Text); dots >= 4 {
+			return true
+		}
+	}
+	return false
 }
 
 // escapeStart keeps a paragraph that happens to start like a heading, a

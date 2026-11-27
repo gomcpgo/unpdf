@@ -402,10 +402,10 @@ func (p *Page) Tables(ctx context.Context) ([]Table, error) {
 	aligned, _ := table.Aligned(words, rest, rules)
 	if len(aligned) > 0 {
 		// Text that lines up among the arcs of a diagram, or on a picture,
-		// is the labels of a figure.
+		// or along the edge of either, is the labels of a figure.
 		shapes, pictures := p.figures()
 		for i := range aligned {
-			if table.Figure(&aligned[i], shapes, pictures) {
+			if table.Figure(&aligned[i], shapes, pictures) || table.Beside(&aligned[i], shapes, pictures) {
 				aligned[i].Confidence = math.Min(aligned[i].Confidence, figureConfidence)
 			}
 		}

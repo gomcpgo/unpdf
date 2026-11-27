@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Line is a line of the page: its words, left to right, as indices into the
@@ -52,9 +53,12 @@ func Aligned(words []Word, lines []Line, rules []Rule) ([]Table, []int) {
 	hs, _ := split(append([]Rule(nil), rules...))
 
 	// A line is tabular when it has a gap wide enough to separate cells.
+	// Lines made by reading across columns of vertical text are no lines at
+	// all, and are left out of the search as text at an angle is.
+	upright := stacked(words, lines)
 	tabular := make([]bool, len(lines))
 	for i, l := range lines {
-		tabular[i] = gapped(words, l)
+		tabular[i] = !upright[i] && gapped(words, l)
 	}
 
 	var tables []Table
@@ -83,7 +87,7 @@ func Aligned(words []Word, lines []Line, rules []Rule) ([]Table, []int) {
 		for end < len(lines) && end-start < maxRows {
 			prev, cur := lines[end-1], lines[end]
 			sz := lineSize(words, cur)
-			if cur.Y0 < prev.Y0-sz || cur.Y0-prev.Y1 > rowPitch*sz {
+			if upright[end] || cur.Y0 < prev.Y0-sz || cur.Y0-prev.Y1 > rowPitch*sz {
 				break
 			}
 			if tabular[end] {
@@ -334,6 +338,65 @@ func gapped(words []Word, l Line) bool {
 		}
 	}
 	return false
+}
+
+// stacked reports, for each line, whether it is a row of characters cut
+// from vertical text: text written down the page in columns, each character
+// set upright by itself, as Chinese and Japanese are. Nothing in such a
+// page says which way it reads, and taken line by line across the page it
+// looks like a table with a character to a cell: the columns of the text
+// line up as the columns of a table do.
+//
+// What gives it away is the spacing. A character stands right under the
+// one before it, a type size further down, and the columns stand apart, so
+// that every "word" of a line is one character and the lines follow each
+// other with no space between them. A table in the same script has words
+// of several characters in its cells, and space between its rows. Three
+// such lines in a row are asked for: one line of single characters may be
+// the header of a table, "Mon Tue Wed" in one character each.
+func stacked(words []Word, lines []Line) []bool {
+	out := make([]bool, len(lines))
+	single := func(l Line) bool {
+		n := 0
+		for _, i := range l.Words {
+			r, size := utf8.DecodeRuneInString(words[i].Text)
+			if size == len(words[i].Text) && upright(r) {
+				n++
+			}
+		}
+		// A column set closer than the others may have joined two
+		// characters into a word here and there.
+		return n > 0 && n*5 >= len(l.Words)*4
+	}
+	for i := 0; i < len(lines); {
+		if !single(lines[i]) {
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(lines) && single(lines[j]) {
+			prev, cur := lines[j-1], lines[j]
+			if pitch := cur.Y0 - prev.Y0; pitch < 0 || pitch > 1.25*lineSize(words, cur) {
+				break
+			}
+			j++
+		}
+		if j-i >= 3 {
+			for k := i; k < j; k++ {
+				out[k] = true
+			}
+		}
+		i = j
+	}
+	return out
+}
+
+// upright reports a character of a script that is written down the page
+// with its characters upright: Chinese characters, kana and hangul, and the
+// punctuation and full-width forms set with them.
+func upright(r rune) bool {
+	return unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul) ||
+		r >= 0x3000 && r <= 0x303F || r >= 0xFF00 && r <= 0xFFEF
 }
 
 // groupNames reports, for each line, whether it names a group of the rows
@@ -1057,10 +1120,11 @@ func align(words []Word, lines []Line, hs []hline) (Table, bool) {
 	conf -= 0.3 * float64(spanning) / float64(len(lines))
 	conf = math.Min(conf, 0.9)
 	switch {
-	case unsure || listLike(&t) || contentsLike(&t) || formulaLike(words, &t):
+	case unsure || listLike(&t) || contentsLike(&t) || formulaLike(words, &t) || formLike(&t):
 		// Prose in columns with nothing to mark the rows; a numbered list
 		// with its numbers set apart; a table of contents; a matrix or a
-		// formula set in rows and columns.
+		// formula set in rows and columns; the questions of a form with
+		// the boxes for their answers.
 		conf = math.Min(conf, 0.3)
 	case well*2 < lineCount && edged < 2, lineCount < 5 && well < lineCount && bounding < 2, cols == 2 && !figures && bounding < 2:
 		// Too ragged; or small, not full and not ruled off, like the
@@ -1536,6 +1600,50 @@ func mathSign(s string) bool {
 	return signs == 1 || (signs > 1 && strings.ContainsRune(s, unicode.ReplacementChar))
 }
 
+// formLike reports the fields of a form that stand in rows and columns: a
+// label, a row of dots, and a box to tick or to write in. The boxes are
+// drawn, not written, so the dots lead to nothing: the cell after them is
+// empty, or holds the label of the next field. In a table, a row of dots
+// leads from a label to its figure.
+//
+// Three cells or more must end a line in such dots, and four in five of
+// the cells that end a line in dots at all.
+func formLike(t *Table) bool {
+	if t.Rows > maxRows || t.Cols > 60 {
+		return false
+	}
+	// For each cell that ends a line in a row of dots, where the next cell
+	// of its row is.
+	type led struct{ row, col, end int }
+	var leds []led
+	figures := map[[2]int]bool{} // the cells that hold a figure
+	for _, c := range t.Cells {
+		if c.Text == "" {
+			continue
+		}
+		dots := false
+		for _, line := range strings.Split(c.Text, "\n") {
+			line = strings.TrimSpace(line)
+			if trimmed := strings.TrimRight(line, ". "); len(line)-len(trimmed) >= 3 && strings.Count(line[len(trimmed):], ".") >= 3 {
+				dots = true
+			}
+			if isNumeric(strings.Trim(line, ". ")) {
+				figures[[2]int{c.Row, c.Col}] = true
+			}
+		}
+		if dots {
+			leds = append(leds, led{c.Row, c.Col, c.Col + max(c.ColSpan, 1)})
+		}
+	}
+	blind := 0
+	for _, l := range leds {
+		if !figures[[2]int{l.row, l.end}] {
+			blind++
+		}
+	}
+	return blind >= 3 && blind*5 >= len(leds)*4
+}
+
 // listLike reports a numbered or bulleted list whose markers stand apart
 // from the text: two columns, the first holding nothing but markers.
 func listLike(t *Table) bool {
@@ -1563,39 +1671,60 @@ func listLike(t *Table) bool {
 
 // contentsLike reports a table of contents: titles on the left, page
 // numbers that never go down on the right.
+//
+// A page number may carry the letter of its part of the document, "K-118"
+// or "A-3". Where the lines of several entries have been put into one row,
+// each line of the last column is the page number of one entry. And a row
+// with one thing on it and no page number is a heading between groups of
+// entries, "Part II": it does not count against the page numbers, and their
+// rise is followed across it.
 func contentsLike(t *Table) bool {
 	if t.Cols > 3 || t.Rows < 4 {
 		return false
 	}
-	pages, rising, pairs := 0, 0, 0
-	last := -1
+	filled := make([]int, t.Rows)  // the cells with text in each row
+	last := make([]string, t.Rows) // the text of its last column
 	for _, c := range t.Cells {
-		if c.Col != t.Cols-1 || !isPageNumber(c.Text) {
+		if c.Text == "" || c.Row < 0 || c.Row >= t.Rows {
 			continue
 		}
-		pages++
-		n := 0
-		for _, r := range c.Text {
-			if r < '0' || r > '9' {
-				n = -1
-				break
-			}
-			n = n*10 + int(r-'0')
+		filled[c.Row]++
+		if c.Col == t.Cols-1 {
+			last[c.Row] = c.Text
 		}
-		if n >= 0 {
-			if last >= 0 {
+	}
+	entries, pages, rising, pairs := 0, 0, 0, 0
+	part, before := "", -1 // of the page number before
+	for r, text := range last {
+		if text == "" {
+			if filled[r] > 1 {
+				entries++
+			}
+			continue
+		}
+		for _, line := range strings.Split(text, "\n") {
+			entries++
+			p, n, ok := pageLabel(strings.TrimSpace(line))
+			if !ok {
+				continue
+			}
+			pages++
+			if n < 0 {
+				continue
+			}
+			if before >= 0 && p == part {
 				pairs++
-				if n >= last {
+				if n >= before {
 					rising++
 				}
 			}
-			last = n
+			part, before = p, n
 		}
 	}
 	if leaders(t)*2 >= t.Rows {
 		return true
 	}
-	if pages*5 < t.Rows*4 || rising*10 < pairs*9 {
+	if pages < 4 || pages*5 < entries*4 || rising*10 < pairs*9 {
 		return false
 	}
 	// The other columns hold words, not figures.
@@ -1632,6 +1761,33 @@ func leaders(t *Table) int {
 		}
 	}
 	return n
+}
+
+// pageLabel reports a page number as a table of contents prints it: a
+// short number in digits or roman numerals, or a number after the letters
+// of a part of the document and a hyphen, "K-118". It returns the part,
+// and the number, which is -1 for roman numerals.
+func pageLabel(s string) (part string, n int, ok bool) {
+	if i := strings.IndexByte(s, '-'); i >= 1 && i <= 3 {
+		for _, r := range s[:i] {
+			if !unicode.IsLetter(r) {
+				return "", 0, false
+			}
+		}
+		part, s = s[:i], s[i+1:]
+	}
+	if !isPageNumber(s) {
+		return "", 0, false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			// Roman numerals. After the letters of a part they would be a
+			// word with a hyphen in it.
+			return "", -1, part == ""
+		}
+		n = n*10 + int(r-'0')
+	}
+	return part, n, true
 }
 
 // isPageNumber reports a short number in digits or roman numerals.

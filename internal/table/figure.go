@@ -109,3 +109,68 @@ func Figure(t *Table, shapes, pictures []Box) bool {
 	}
 	return false
 }
+
+// edgeRows is the most rows a table may have to be taken for the labels
+// along the edge of a figure: the labels of an axis, a legend under it, the
+// titles of two charts side by side.
+const edgeRows = 4
+
+// Beside reports whether a small table found by alignment is the labels
+// along the edge of a figure: the years under a chart with its legend, the
+// titles over two charts that stand side by side. Figure asks what is drawn
+// through the text or under it. Here nothing is: the plot is a picture, or
+// lines drawn, that begins where the text ends.
+//
+// The table has four rows or fewer. A picture, or the curves and slanting
+// lines taken together, reaches to within a row's height of its top or its
+// bottom edge from outside, lies over or under half its width or more, and
+// goes on from there for at least the table's own height: the figure is
+// larger than its labels. A table with a figure near it has more between
+// the two than one row's height: a title, a caption, a space.
+func Beside(t *Table, shapes, pictures []Box) bool {
+	if t.Rows < 1 || t.Rows > edgeRows || t.X1 <= t.X0 || t.Y1 <= t.Y0 {
+		return false
+	}
+	w, h := t.X1-t.X0, t.Y1-t.Y0
+	row := h / float64(t.Rows)
+	// What is drawn above the table and reaches down to it, and what is
+	// drawn below and reaches up to it: its extent across, and how far it
+	// goes on.
+	type side struct {
+		x0, x1, far float64
+		touches     bool
+	}
+	above := side{math.Inf(1), math.Inf(-1), t.Y0, false}
+	below := side{math.Inf(1), math.Inf(-1), t.Y1, false}
+	add := func(b Box) bool {
+		if math.Min(b.X1, t.X1)-math.Max(b.X0, t.X0) <= 0 {
+			return false
+		}
+		mid := (b.Y0 + b.Y1) / 2
+		switch {
+		case mid < t.Y0 && b.Y1 >= t.Y0-row && b.Y1 <= t.Y0+row:
+			above.touches = true
+			above.x0, above.x1, above.far = math.Min(above.x0, b.X0), math.Max(above.x1, b.X1), math.Min(above.far, b.Y0)
+		case mid > t.Y1 && b.Y0 <= t.Y1+row && b.Y0 >= t.Y1-row:
+			below.touches = true
+			below.x0, below.x1, below.far = math.Min(below.x0, b.X0), math.Max(below.x1, b.X1), math.Max(below.far, b.Y1)
+		default:
+			return false
+		}
+		return true
+	}
+	figure := func(s side, reach float64) bool {
+		return s.touches && math.Min(s.x1, t.X1)-math.Max(s.x0, t.X0) >= 0.5*w && reach >= h
+	}
+	for _, p := range pictures {
+		above, below = side{math.Inf(1), math.Inf(-1), t.Y0, false}, side{math.Inf(1), math.Inf(-1), t.Y1, false}
+		if add(p) && (figure(above, t.Y0-above.far) || figure(below, below.far-t.Y1)) {
+			return true
+		}
+	}
+	above, below = side{math.Inf(1), math.Inf(-1), t.Y0, false}, side{math.Inf(1), math.Inf(-1), t.Y1, false}
+	for _, s := range shapes {
+		add(s)
+	}
+	return figure(above, t.Y0-above.far) || figure(below, below.far-t.Y1)
+}
